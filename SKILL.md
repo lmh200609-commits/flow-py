@@ -147,6 +147,45 @@ asyncio.run(main())
 | Policy rejection | Revise the prompt |
 | Selector failed (UIError) | Flow UI may have changed; check `flow --debug generate image "test"` |
 
+## Architecture Overview
+
+| File | Purpose |
+|---|---|
+| `flow/__init__.py` | Package exports, public API surface |
+| `flow/_models.py` | Data models (enums, dataclasses), prompt file parser |
+| `flow/_exceptions.py` | Exception hierarchy (FlowError, AuthError, PolicyError, etc.) |
+| `flow/_storage.py` | `~/.flow-py/` config + project persistence (JSON) |
+| `flow/_browser.py` | Playwright browser lifecycle manager, persistent context |
+| `flow/_client.py` | Main async `FlowClient` API (generate, batch, project mgmt) |
+| `flow/_downloader.py` | Robust media downloader (URL extraction + aiohttp download) |
+| `flow/_gallery.py` | `GalleryWatcher`: DOM snapshot, wait-for-new, latest media src |
+| `flow/_flow_ui.py` | `FlowUI`: High-level UI selectors/interactions for Flow |
+| `flow/cli/main.py` | Click CLI root, login/batch/projects/config/status commands |
+| `flow/cli/_generate.py` | `generate image/video/frame` subcommands (refactored) |
+| `tests/test_models.py` | Tests for models, prompt parser, safe_filename |
+| `tests/test_storage.py` | Tests for config/project persistence |
+
+### Key design patterns
+- **Persistent Playwright context**: Session cookies survive across CLI runs (no re-login)
+- **Multiple selector strategies**: Each UI method tries aria-label, role, text, CSS class, then JS fallback
+- **Response interception**: Captures `storage.googleapis.com` URLs during generation for direct download
+- **Gallery polling**: Watches DOM for new items after clicking Generate
+- **Pipeline mode**: `|||` syntax in prompt files chains image generation -> frame-to-video animation
+
+## Troubleshooting (Extended)
+
+| Problem | Cause | Fix |
+|---|---|---|
+| `Auth error: Not logged in` | No session cookies | Run `flow login` |
+| `No active project` | Config missing project | Run `flow projects create` or `flow login` |
+| Generation times out | Slow network or UI changed | `flow config set generation_timeout_s 600`; try `--no-headless` |
+| Policy rejection | Google content filter | Revise the prompt text |
+| UI changed / selector failed | Flow UI updated | Update selectors in `_flow_ui.py`; check with `--debug` |
+| `input()` blocks event loop | Bug in async code | Fixed: uses `run_in_executor` |
+| Import errors on CLI | Package not installed | Run `pip3 install -e ".[dev]"` |
+| `asyncio.run()` nesting | Calling from inside event loop | CLI uses sync Click commands that call `asyncio.run()` correctly |
+| Download fails but URL intercepted | GCS URL expired | Increase `download_timeout_s` in config |
+
 ## Integration with Buddhist Video Pipeline
 
 For 大般若经 video slides, use batch mode with 9:16 portrait images:

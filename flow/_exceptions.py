@@ -1,4 +1,5 @@
 """Custom exceptions for flow-py."""
+from __future__ import annotations
 
 
 class FlowError(Exception):

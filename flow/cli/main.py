@@ -5,9 +5,9 @@ Entry point: `flow` (configured in pyproject.toml [project.scripts]).
 Commands
 --------
 flow login                          # Interactive Google auth
-flow generate image   <prompt>      # Text → image
-flow generate video   <prompt>      # Text → video (Veo)
-flow generate frame   <img> <prompt># Image → video (Frame-to-Video)
+flow generate image   <prompt>      # Text -> image
+flow generate video   <prompt>      # Text -> video (Veo)
+flow generate frame   <img> <prompt># Image -> video (Frame-to-Video)
 flow batch            <file>        # Process a prompts file
 flow projects list                  # List known projects
 flow projects create  [name]        # Create a new project
@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +28,6 @@ import click
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
-from rich import print as rprint
 
 from .._client import FlowClient
 from .._exceptions import (
@@ -54,6 +52,7 @@ from .._storage import (
     load_projects,
     save_config,
 )
+from ._generate import generate
 
 console = Console()
 err_console = Console(stderr=True)
@@ -66,7 +65,7 @@ err_console = Console(stderr=True)
 @click.version_option(package_name="flow-py", prog_name="flow")
 @click.option("--debug", is_flag=True, hidden=True)
 def cli(debug: bool):
-    """🎬 flow — Google Flow AI automation CLI.
+    """flow -- Google Flow AI automation CLI.
 
     Automate image and video generation on labs.google/fx from the command line.
 
@@ -81,6 +80,10 @@ def cli(debug: bool):
         logging.basicConfig(level=logging.DEBUG)
     else:
         logging.basicConfig(level=logging.WARNING)
+
+
+# Register the generate group from _generate.py
+cli.add_command(generate)
 
 
 # ──────────────────────────────────────────────
@@ -102,182 +105,6 @@ def login():
             await client.login()
         finally:
             await client.close()
-
-    asyncio.run(_run())
-
-
-# ──────────────────────────────────────────────
-#  flow generate
-# ──────────────────────────────────────────────
-
-@cli.group()
-def generate():
-    """Generate images or videos from text prompts."""
-    pass
-
-
-# ── generate image ────────────────────────────
-
-@generate.command("image")
-@click.argument("prompt")
-@click.option("-o", "--output", "output_dir", default=".", show_default=True,
-              help="Output directory for downloaded images.")
-@click.option("-n", "--count", default=1, show_default=True,
-              help="Number of images to generate.")
-@click.option("--aspect", "aspect_ratio",
-              type=click.Choice(["16:9", "9:16", "1:1"]),
-              default="16:9", show_default=True,
-              help="Aspect ratio.")
-@click.option("--headless/--no-headless", default=None,
-              help="Override headless mode.")
-@click.option("-f", "--filename", default=None,
-              help="Output filename stem (no extension).")
-def generate_image(
-    prompt: str,
-    output_dir: str,
-    count: int,
-    aspect_ratio: str,
-    headless: Optional[bool],
-    filename: Optional[str],
-):
-    """Generate an IMAGE from a text prompt.
-
-    \b
-    Examples:
-      flow generate image "golden Buddha on lotus throne, divine light"
-      flow generate image "cherry blossoms" --aspect 9:16 --output ./photos
-      flow generate image "mountain landscape" -n 4
-    """
-    _check_auth()
-
-    ar = AspectRatio(aspect_ratio)
-    output_path = Path(output_dir)
-
-    async def _run():
-        async with await FlowClient.create(headless=headless) as client:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]Generating image…"),
-                TimeElapsedColumn(),
-                transient=True,
-            ) as progress:
-                progress.add_task("gen", total=None)
-                result = await client.generate_image(
-                    prompt=prompt,
-                    output_dir=output_path,
-                    filename=filename,
-                    aspect_ratio=ar,
-                    count=count,
-                )
-            _print_result(result)
-
-    _run_async(_run)
-
-
-# ── generate video ────────────────────────────
-
-@generate.command("video")
-@click.argument("prompt")
-@click.option("-o", "--output", "output_dir", default=".", show_default=True,
-              help="Output directory.")
-@click.option("--aspect", "aspect_ratio",
-              type=click.Choice(["16:9", "9:16"]),
-              default="16:9", show_default=True)
-@click.option("--duration",
-              type=click.Choice(["5s", "8s"]),
-              default="8s", show_default=True,
-              help="Video duration.")
-@click.option("--headless/--no-headless", default=None)
-@click.option("-f", "--filename", default=None)
-def generate_video(
-    prompt: str,
-    output_dir: str,
-    aspect_ratio: str,
-    duration: str,
-    headless: Optional[bool],
-    filename: Optional[str],
-):
-    """Generate a VIDEO from a text prompt (Veo).
-
-    \b
-    Examples:
-      flow generate video "aurora borealis, time-lapse, cinematic"
-      flow generate video "temple bells swinging, slow motion" --aspect 9:16
-      flow generate video "ocean waves at sunset" --duration 5s -o ./clips
-    """
-    _check_auth()
-
-    async def _run():
-        async with await FlowClient.create(headless=headless) as client:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]Generating video… (this takes 30-90s)"),
-                TimeElapsedColumn(),
-                transient=True,
-            ) as progress:
-                progress.add_task("gen", total=None)
-                result = await client.generate_video(
-                    prompt=prompt,
-                    output_dir=Path(output_dir),
-                    filename=filename,
-                    aspect_ratio=AspectRatio(aspect_ratio),
-                    duration=duration,
-                )
-            _print_result(result)
-
-    _run_async(_run)
-
-
-# ── generate frame ────────────────────────────
-
-@generate.command("frame")
-@click.argument("image_path")
-@click.argument("prompt")
-@click.option("-o", "--output", "output_dir", default=".", show_default=True)
-@click.option("--duration", type=click.Choice(["5s", "8s"]), default="8s")
-@click.option("--headless/--no-headless", default=None)
-@click.option("-f", "--filename", default=None)
-def generate_frame(
-    image_path: str,
-    prompt: str,
-    output_dir: str,
-    duration: str,
-    headless: Optional[bool],
-    filename: Optional[str],
-):
-    """Animate a static IMAGE with a motion prompt (Frame-to-Video).
-
-    \b
-    IMAGE_PATH  Source image (PNG/JPEG)
-    PROMPT      Motion/camera description
-
-    \b
-    Examples:
-      flow generate frame buddha.png "slow zoom-in with golden particles rising"
-      flow generate frame slide.jpg "gentle camera pan left, wind in trees" --duration 5s
-    """
-    _check_auth()
-    if not Path(image_path).exists():
-        err_console.print(f"[red]Error:[/red] Image not found: {image_path}")
-        sys.exit(1)
-
-    async def _run():
-        async with await FlowClient.create(headless=headless) as client:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[bold blue]Animating image… (30-90s)"),
-                TimeElapsedColumn(),
-                transient=True,
-            ) as progress:
-                progress.add_task("gen", total=None)
-                result = await client.generate_frame_to_video(
-                    image_path=image_path,
-                    prompt=prompt,
-                    output_dir=Path(output_dir),
-                    filename=filename,
-                    duration=duration,
-                )
-            _print_result(result)
 
     _run_async(_run)
 
@@ -311,9 +138,9 @@ def batch(
 
     \b
     File formats supported:
-      • Plain text (one prompt per line)
-      • Tagged blocks ([TAG] prompt, blank-line separated)
-      • Pipeline (image_prompt ||| video_prompt for image→video)
+      - Plain text (one prompt per line)
+      - Tagged blocks ([TAG] prompt, blank-line separated)
+      - Pipeline (image_prompt ||| video_prompt for image->video)
 
     \b
     Examples:
@@ -347,16 +174,16 @@ def batch(
                 TimeElapsedColumn(),
                 console=console,
             ) as progress:
-                task = progress.add_task("Generating…", total=len(parsed))
+                task = progress.add_task("Generating...", total=len(parsed))
                 completed = [0]
 
                 def on_result(result: GenerationResult, idx: int, total: int):
                     completed[0] += 1
-                    status = "✅" if result.succeeded else "❌"
+                    status_icon = "OK" if result.succeeded else "FAIL"
                     progress.update(
                         task,
                         advance=1,
-                        description=f"{status} [{completed[0]}/{total}] {result.prompt[:50]}…",
+                        description=f"{status_icon} [{completed[0]}/{total}] {result.prompt[:50]}...",
                     )
 
                 batch_result = await client.batch_generate(
@@ -393,8 +220,8 @@ def projects_list():
         return
     table = Table("ID", "Name", "Active", "URL", title="Flow Projects")
     for pid, info in known.items():
-        active = "✅" if pid == active_id else ""
-        table.add_row(pid[:16] + "…", info.get("name", ""), active, info.get("url", "")[:60] + "…")
+        active = "YES" if pid == active_id else ""
+        table.add_row(pid[:16] + "...", info.get("name", ""), active, info.get("url", "")[:60] + "...")
     console.print(table)
 
 
@@ -405,9 +232,9 @@ def projects_create(name: str, headless: Optional[bool]):
     """Create a new Flow project."""
     async def _run():
         async with await FlowClient.create(headless=headless) as client:
-            with console.status("Creating project…"):
+            with console.status("Creating project..."):
                 pid = await client.create_project(name)
-            console.print(f"[green]✅ Created project:[/green] {pid}")
+            console.print(f"[green]Created project:[/green] {pid}")
 
     _run_async(_run)
 
@@ -419,7 +246,7 @@ def projects_use(project_id_or_url: str):
     async def _run():
         async with await FlowClient.create() as client:
             await client.use_project(project_id_or_url)
-        console.print(f"[green]✅ Active project:[/green] {project_id_or_url}")
+        console.print(f"[green]Active project:[/green] {project_id_or_url}")
 
     _run_async(_run)
 
@@ -481,7 +308,7 @@ def config_set(key: str, value: str):
 
     setattr(cfg, key, coerced)
     save_config(cfg)
-    console.print(f"[green]✅ Set {key} = {coerced}[/green]")
+    console.print(f"[green]Set {key} = {coerced}[/green]")
 
 
 # ──────────────────────────────────────────────
@@ -496,7 +323,7 @@ def status():
     cfg = load_config()
 
     console.print("\n[bold]flow-py status[/bold]")
-    console.print(f"  Auth:           {'[green]✅ Logged in[/green]' if authed else '[red]❌ Not authenticated[/red]'}")
+    console.print(f"  Auth:           {'[green]Logged in[/green]' if authed else '[red]Not authenticated[/red]'}")
     console.print(f"  Active project: {pid or '[yellow]none[/yellow]'}")
     if purl:
         console.print(f"  Project URL:    {purl}")
@@ -537,43 +364,26 @@ def _run_async(coro_fn):
 
 
 def _check_auth():
-    """Warn if not authenticated (non-fatal — browser will redirect)."""
+    """Warn if not authenticated (non-fatal -- browser will redirect)."""
     if not is_authenticated():
-        console.print("[yellow]⚠ No saved session found. If this fails, run `flow login` first.[/yellow]\n")
+        console.print("[yellow]Warning: No saved session found. If this fails, run `flow login` first.[/yellow]\n")
 
 
-def _print_result(result: GenerationResult):
-    """Pretty-print a single GenerationResult."""
-    if result.succeeded:
-        console.print(f"\n[green]✅ Generation complete[/green] ({result.elapsed_s:.1f}s)")
-        for fp in result.file_paths:
-            console.print(f"   📁 {fp}")
-        if result.media_urls and not result.file_paths:
-            console.print("[yellow]   (intercepted URLs — manual download may be needed)[/yellow]")
-            for url in result.media_urls[:3]:
-                console.print(f"   🔗 {url[:100]}")
-    elif result.status == GenerationStatus.POLICY_REJECTED:
-        console.print(f"\n[red]🚫 Content policy rejection[/red]")
-        console.print(f"   Prompt: {result.prompt[:80]}")
-    else:
-        console.print(f"\n[red]❌ Generation failed[/red]: {result.error}")
-
-
-def _print_batch_result(batch: BatchResult, output_dir: Path):
+def _print_batch_result(batch_obj: BatchResult, output_dir: Path):
     """Pretty-print batch summary."""
-    elapsed = batch.elapsed_s
+    elapsed = batch_obj.elapsed_s
     elapsed_str = f"{elapsed:.0f}s" if elapsed else "?"
 
     console.print(f"\n[bold]Batch complete[/bold] ({elapsed_str})")
-    console.print(f"  Total:     {batch.total}")
-    console.print(f"  ✅ Success: [green]{batch.completed}[/green]")
-    console.print(f"  ❌ Failed:  [red]{batch.failed}[/red]")
-    if batch.skipped:
-        console.print(f"  ⏭ Skipped: {batch.skipped}")
-    console.print(f"  📁 Output:  {output_dir.resolve()}")
+    console.print(f"  Total:     {batch_obj.total}")
+    console.print(f"  Success:   [green]{batch_obj.completed}[/green]")
+    console.print(f"  Failed:    [red]{batch_obj.failed}[/red]")
+    if batch_obj.skipped:
+        console.print(f"  Skipped:   {batch_obj.skipped}")
+    console.print(f"  Output:    {output_dir.resolve()}")
 
-    if batch.failed > 0:
+    if batch_obj.failed > 0:
         console.print("\n[yellow]Failed prompts:[/yellow]")
-        for r in batch.results:
+        for r in batch_obj.results:
             if not r.succeeded and r.status != GenerationStatus.SKIPPED:
-                console.print(f"  • {r.prompt[:70]} → {r.status.value}: {r.error}")
+                console.print(f"  - {r.prompt[:70]} -> {r.status.value}: {r.error}")

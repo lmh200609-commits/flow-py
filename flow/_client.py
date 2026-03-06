@@ -152,7 +152,7 @@ class FlowClient:
         print("🌐 Browser opened. Please sign in to Google and navigate to Flow.")
         print("   When the Flow project page is visible, press ENTER here to continue.")
         try:
-            input()
+            await asyncio.get_running_loop().run_in_executor(None, input)
         except EOFError:
             pass
 

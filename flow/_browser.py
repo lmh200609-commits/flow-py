@@ -192,8 +192,8 @@ class BrowserManager:
         page.on("response", on_response)
         try:
             await trigger_fn()
-            deadline = asyncio.get_event_loop().time() + timeout_s
-            while not captured and asyncio.get_event_loop().time() < deadline:
+            deadline = asyncio.get_running_loop().time() + timeout_s
+            while not captured and asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(0.3)
         finally:
             page.remove_listener("response", on_response)
@@ -221,12 +221,19 @@ class BrowserManager:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for t in pending:
             t.cancel()
+        # Suppress cancellation errors
+        for t in pending:
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
         if not done:
             raise UIError(
                 f"None of the selectors became visible within {timeout_ms}ms",
                 str(selectors),
             )
-        return await next(iter(done))
+        result_task = next(iter(done))
+        return result_task.result()
 
     async def fill_textarea(self, page: Page, text: str) -> None:
         """Find Flow's prompt textarea and fill it (clears first)."""
