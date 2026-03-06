@@ -1,3 +1,56 @@
+# Python
 *.pyc
 __pycache__/
 *.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.xml
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Playwright / browser state
+playwright-report/
+test-results/
+
+# User data / secrets
+flow_config.json
+~/.flow/
+*.bearer
+*.token
+
+# Downloaded media (large files)
+flow_downloads/
+flow_images/
+flow_videos/
+*.mp4
+*.mp3
+*.jpg
+*.jpeg
+*.png
+!assets/
+!docs/
+
+# Logs
+*.log
+/tmp/

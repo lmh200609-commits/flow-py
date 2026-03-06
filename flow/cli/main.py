@@ -41,10 +41,39 @@ from .._api import (
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
+# Global verbosity context (set by CLI root)
+_VERBOSE = False
+_QUIET = False
+
+
+def vprint(*args, **kwargs):
+    """Print only when --verbose is active."""
+    if _VERBOSE:
+        click.echo(*args, **kwargs)
+
+
+def qprint(*args, **kwargs):
+    """Print only when NOT --quiet."""
+    if not _QUIET:
+        click.echo(*args, **kwargs)
+
+
 def _poll_cb(status, elapsed: float):
     """Progress bar callback for wait operations."""
+    if _QUIET:
+        return
     bar = "▓" * min(30, int(elapsed / 10)) + "░" * max(0, 30 - int(elapsed / 10))
     click.echo(f"\r  ⏳ {bar} {elapsed:.0f}s  {status.status}", nl=False, err=True)
+
+
+def _poll_cb_verbose(status, elapsed: float):
+    """Verbose progress callback — prints full status line."""
+    if _QUIET:
+        return
+    if _VERBOSE:
+        click.echo(f"  [{elapsed:.0f}s] status={status.status}", err=True)
+    else:
+        _poll_cb(status, elapsed)
 
 
 def run(coro):
@@ -60,6 +89,8 @@ async def _make_client(
     cdp_url = "http://127.0.0.1:9222" if cdp else None
     cfg = load_config()
     pid = project_id or get_active_project()[0] or ""
+    if _VERBOSE:
+        click.echo(f"  🔌 Connecting browser (cdp={bool(cdp_url)}, headless={headless})", err=True)
     return await FlowClient.create(
         pid, workflow_id, headless=headless, cdp_url=cdp_url,
         timeout_s=cfg.generation_timeout_s,
@@ -70,12 +101,22 @@ async def _make_client(
 
 @click.group()
 @click.version_option()
-@click.option("--debug", is_flag=True, help="Enable debug logging")
-def cli(debug: bool):
+@click.option("--debug",   is_flag=True, help="Enable debug logging")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output (extra detail)")
+@click.option("--quiet",   "-q", is_flag=True, help="Suppress progress, print only results")
+@click.pass_context
+def cli(ctx: click.Context, debug: bool, verbose: bool, quiet: bool):
     """🎬 Google Flow AI — video & image generation CLI"""
+    global _VERBOSE, _QUIET
+    _VERBOSE = verbose
+    _QUIET = quiet
     if debug:
         import logging
         logging.basicConfig(level=logging.DEBUG)
+    # Store in context for subcommands that want to inspect
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    ctx.obj["quiet"] = quiet
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -196,6 +237,111 @@ def config():
     click.echo(f"Headless:       {cfg.headless}")
     click.echo(f"Output dir:     {cfg.default_output_dir}")
     click.echo(f"Profile dir:    ~/.flow-py/browser-profile")
+
+
+@cli.command()
+@click.option("--project", "-p", default=None, help="Project ID to check")
+@click.option("--cdp", is_flag=True, help="Connect to existing Chrome CDP")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def status(project: Optional[str], cdp: bool, as_json: bool):
+    """Show current auth, project, credits, and recent workflow status.
+
+    A quick health-check command — tells you everything you need before generating.
+
+    Examples:\n
+        flow status\n
+        flow status --json
+    """
+    async def _go():
+        from .._storage import load_projects
+
+        pid, url = get_active_project()
+        pid = project or pid or ""
+        cfg = load_config()
+        projects = load_projects()
+
+        info: dict = {
+            "auth": "unknown",
+            "active_project": pid or None,
+            "project_url": url or None,
+            "credits": None,
+            "tier": None,
+            "recent_workflows": [],
+            "config": {
+                "timeout_s": cfg.generation_timeout_s,
+                "headless": cfg.headless,
+                "output_dir": str(cfg.default_output_dir),
+            },
+        }
+
+        if not pid:
+            info["auth"] = "no_project"
+            if as_json:
+                click.echo(json.dumps(info, indent=2))
+            else:
+                click.echo("⚠️  No active project. Run `flow use <project_id>` first.")
+            return
+
+        # Try to connect and fetch live data
+        try:
+            client = await _make_client(pid, cdp=cdp)
+            try:
+                # Credits
+                credits_obj = await client.get_credits()
+                info["credits"] = credits_obj.credits
+                info["tier"] = credits_obj.tier
+                info["auth"] = "authenticated"
+
+                # Recent workflows
+                try:
+                    wfs = await client.get_workflows()
+                    recent = wfs[-5:] if len(wfs) > 5 else wfs
+                    info["recent_workflows"] = [
+                        {
+                            "id": wf.name,
+                            "name": wf.display_name or "(unnamed)",
+                            "media_id": wf.primary_media_id[:16] if wf.primary_media_id else "",
+                        }
+                        for wf in recent
+                    ]
+                except Exception as wf_err:
+                    info["recent_workflows"] = []
+                    if _VERBOSE:
+                        click.echo(f"  ⚠️ Could not fetch workflows: {wf_err}", err=True)
+
+            finally:
+                await client.close()
+
+        except AuthError:
+            info["auth"] = "not_logged_in"
+        except Exception as e:
+            info["auth"] = f"error: {e}"
+
+        if as_json:
+            click.echo(json.dumps(info, indent=2))
+            return
+
+        # Human-friendly display
+        auth_icon = "✅" if info["auth"] == "authenticated" else "❌"
+        click.echo(f"\n{'─'*50}")
+        click.echo(f"  🎬 flow-py Status")
+        click.echo(f"{'─'*50}")
+        click.echo(f"  Auth:        {auth_icon} {info['auth']}")
+        click.echo(f"  Project:     {pid[:8]}...{pid[-4:] if len(pid)>12 else pid}")
+        if info["credits"] is not None:
+            credit_icon = "💳" if info["credits"] > 100 else "⚠️"
+            click.echo(f"  Credits:     {credit_icon} {info['credits']} ({info['tier']})")
+        click.echo(f"  Timeout:     {cfg.generation_timeout_s}s")
+        click.echo(f"  Headless:    {cfg.headless}")
+
+        if info["recent_workflows"]:
+            click.echo(f"\n  📁 Recent workflows ({len(info['recent_workflows'])}):")
+            for wf in info["recent_workflows"]:
+                click.echo(f"     {wf['id'][:12]}...  {wf['name'][:30]}")
+
+        click.echo(f"{'─'*50}\n")
+
+    run(_go())
 
 
 # ══════════════════════════════════════════════════════════════════════════════

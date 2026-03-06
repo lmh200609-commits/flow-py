@@ -1,10 +1,17 @@
 # flow-py 🎬
 
-> Unofficial Python CLI & API for [Google Flow AI](https://labs.google/fx/tools/flow) — bulk image/video generation automation.
+> Unofficial Python API & CLI for [Google Flow AI](https://labs.google/fx/tools/flow) — full programmatic control of video and image generation.
 
-Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Uses Playwright for browser automation so no private API reverse-engineering is needed.
+[![PyPI](https://img.shields.io/badge/pypi-flow--py-blue)](https://pypi.org/project/flow-py/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-⚠️ **Unofficial** — uses browser automation. Google can change the UI at any time.
+Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Uses Playwright browser automation to drive Google Flow AI — no undocumented API hacking needed.
+
+---
+
+> ⚠️ **Unofficial** — uses browser automation. Google can change the UI at any time.  
+> Not affiliated with Google. For research and personal projects only.
 
 ---
 
@@ -12,70 +19,121 @@ Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Uses Pla
 
 | Capability | CLI | Python API |
 |---|---|---|
-| Text → Image (Imagen / Nano Banana) | ✅ | ✅ |
-| Text → Video (Veo) | ✅ | ✅ |
-| Image → Video (Frame-to-Video) | ✅ | ✅ |
-| Image → Video Pipeline (`\|\|\|` syntax) | ✅ | ✅ |
-| Batch processing (prompts file) | ✅ | ✅ |
-| Streaming batch (async generator) | — | ✅ |
-| Project management | ✅ | ✅ |
-| Session persistence (no re-login) | ✅ | ✅ |
-| Media URL interception | auto | auto |
-| Progress display (Rich) | ✅ | — |
+| Text → Video (Veo 3) | ✅ | ✅ |
+| Text → Image (Imagen / Nano Banana 2) | ✅ | ✅ |
+| Image → Video (I2V) | ✅ | ✅ |
+| Multi-reference Video (R2V) | ✅ | ✅ |
+| Extend Video | ✅ | ✅ |
+| Extend Loop (make arbitrarily long videos) | ✅ | ✅ |
+| Upscale to 1080p / 4K (**free, 0 credits**) | ✅ | ✅ |
+| Camera Motion (Dolly, Orbit, Zoom…) | ✅ | ✅ |
+| Camera Position (Stationary variants) | ✅ | ✅ |
+| Insert Object into Video | ✅ | ✅ |
+| Remove Object from Video | ✅ | ✅ |
+| Batch generation (prompts file) | ✅ | ✅ |
+| Project & workflow management | ✅ | ✅ |
+| Credit balance check | ✅ | ✅ |
+| Media download | ✅ | ✅ |
+
+---
+
+## How It Works
+
+Google Flow AI's generation endpoints are protected by **reCAPTCHA Enterprise**. Tokens generated programmatically are rejected with 403. The only way to get valid tokens is through **real UI button clicks**.
+
+flow-py solves this with a two-layer architecture:
+
+- **Read-only ops** (credits, model config, poll status) → direct HTTP via `requests` / `aiohttp`
+- **Generation ops** → Playwright browser automation + network interception (`UIInterceptor`)
+
+The `UIInterceptor` listens to all `aisandbox-pa.googleapis.com` traffic, waits for the real button click to fire the reCAPTCHA, then captures the full request/response for result extraction.
 
 ---
 
 ## Installation
 
 ```bash
-# From the skill directory
-bash install.sh
+# From PyPI
+pip install flow-py
 
-# Or with a self-contained venv
-bash install.sh --venv
-
-# Dev/editable mode
-bash install.sh --dev
+# Or from source
+git clone https://github.com/eddiefu576/flow-py
+cd flow-py
+pip install -e ".[dev]"
+playwright install chromium
 ```
 
 ---
 
 ## Quick Start
 
+### CLI
+
 ```bash
-# 1. Authenticate (one-time — opens browser)
+# Authenticate once (opens browser)
 flow login
 
-# 2. Generate
-flow generate image "golden Buddha on lotus throne, celestial clouds, 8K"
-flow generate video "aurora borealis, time-lapse, cinematic" --output ./clips
-flow generate frame buddha.png "slow zoom-in with golden particles rising"
+# Generate a video
+flow video "Temple bells ring as golden mist rises over sacred mountains"
 
-# 3. Batch
-flow batch prompts.txt --mode image --output-dir ./gallery
+# Generate images
+flow image "Crystal lotus floating on sacred mountain lake" -n 4
+
+# Extend a video
+flow extend <media_id> --prompt "Continue the scene with wind and light"
+
+# Upscale to 1080p (FREE!)
+flow upscale <media_id>
+
+# Apply camera motion
+flow camera <media_id> --motion dolly-in
+
+# Check credits
+flow credits
 ```
 
----
+### Python API
 
-## Prompts File Format
+```python
+import asyncio
+from flow import FlowClient
 
-### Plain text
-```
-A golden Buddha on a lotus throne, celestial clouds
-Subhuti meditating, white hair, divine light
-```
+async def main():
+    async with await FlowClient.create(
+        project_id="your-project-id",
+        cdp_url="http://127.0.0.1:9222",  # attach to existing Chrome
+    ) as client:
 
-### Tagged blocks (blank-line separated)
-```
-[V1-S1] Establishing wide shot of golden Buddha on lotus throne, divine rays
+        # Check credits
+        credits = await client.get_credits()
+        print(f"Credits: {credits}")
 
-[V1-S2] Close-up of Subhuti, contemplative expression, golden particles
-```
+        # Text → Video
+        job = await client.generate_video(
+            "Golden lotus temple at dusk, cinematic camera sweep",
+            aspect="portrait",
+        )
+        result = await client.wait_for_video(job)
+        print(f"Video ready: {result.media_name}")
 
-### Image → Video Pipeline (image_prompt ||| video_prompt)
-```
-[V1-S1] Golden Buddha on lotus throne ||| Slow zoom-in with golden particles rising
-[V1-S2] Subhuti close-up, white hair  ||| Gentle camera orbit, wind stirring robes
+        # Text → Image (synchronous, ~45s)
+        images = await client.generate_image(
+            "Sacred mountain lake at dawn",
+            count=4,
+        )
+        for img in images:
+            print(f"Image: {img.fife_url}")
+
+        # Extend video
+        extended = await client.extend_video(
+            result.media_name,
+            prompt="Continue with wind sweeping through the valley",
+        )
+
+        # Upscale (FREE!)
+        hd_name = await client.upscale_video(result.media_name)
+
+asyncio.run(main())
 ```
 
 ---
@@ -83,167 +141,97 @@ Subhuti meditating, white hair, divine light
 ## CLI Reference
 
 ```
-flow login                          Authenticate with Google (opens browser)
-flow status                         Check auth + active project
-flow generate image  <PROMPT>       Text → image
-flow generate video  <PROMPT>       Text → video (Veo)
-flow generate frame  <IMG> <PROMPT> Image → video (Frame-to-Video)
-flow batch <FILE>                   Process a prompts file
-flow projects list                  List known projects
-flow projects create [NAME]         Create a new project
-flow projects use <ID|URL>          Switch active project
-flow config show                    View config
-flow config set KEY VALUE           Edit config
-```
+flow video      <PROMPT>         Text → Video (Veo)
+flow image      <PROMPT>         Text → Image (Imagen / Nano Banana 2)
+flow frames     <IMG> <PROMPT>   Image → Video (I2V / frame-to-video)
+flow extend     <MEDIA_ID>       Extend a video (make it longer)
+flow extend-loop <MEDIA_ID>      Extend N times in sequence
+flow upscale    <MEDIA_ID>       Upscale to 1080p (FREE)
+flow camera     <MEDIA_ID>       Apply camera motion
+flow camera-pos <MEDIA_ID>       Apply camera position change
+flow insert     <MEDIA_ID>       Insert object with text prompt
+flow remove     <MEDIA_ID>       Remove object with mask
 
-### generate image
-```
-flow generate image "cherry blossoms in rain, impressionist"
-flow generate image "mountain lake" --aspect 9:16 --output ./photos
-flow generate image "portrait" -n 4 --no-headless
-```
-
-### generate video
-```
-flow generate video "ocean waves at sunset, slow motion"
-flow generate video "temple bells swinging" --duration 5s --aspect 9:16
-```
-
-### generate frame
-```
-flow generate frame slide.jpg "gentle camera pan, wind in trees"
-flow generate frame image.png "orbit left, particles rise" --duration 5s
-```
-
-### batch
-```
-flow batch prompts.txt
-flow batch prompts.txt --mode video --output-dir ./videos
-flow batch pipeline.txt --delay 5
+flow credits                     Show remaining credits
+flow models                      List all available models + costs
+flow projects                    List saved projects
+flow use        <PROJECT_ID>     Set active project
+flow workflows                   List workflows in active project
+flow poll       <MEDIA_ID>       Poll video generation status
+flow download   <MEDIA_ID>       Download generated media
+flow download-all                Download all media from active workflow
+flow batch-images <FILE>         Batch image generation from prompts file
+flow batch-videos <FILE>         Batch video generation from prompts file
+flow login                       Authenticate with Google
+flow logout                      Clear saved session
+flow config                      Show current configuration
 ```
 
 ---
 
-## Python API
+## Camera Motions
 
-```python
-import asyncio
-from flow import FlowClient, GenerationMode, AspectRatio
-
-async def main():
-    async with await FlowClient.create() as client:
-
-        # Generate image
-        result = await client.generate_image(
-            "golden Buddha on lotus throne, 8K",
-            output_dir="./outputs",
-            aspect_ratio=AspectRatio.PORTRAIT,
-        )
-        print("Saved to:", result.primary_file)
-
-        # Generate video
-        result = await client.generate_video(
-            "aurora borealis, cinematic time-lapse",
-            output_dir="./videos",
-        )
-
-        # Frame-to-video
-        result = await client.generate_frame_to_video(
-            image_path="./slide.png",
-            prompt="slow zoom-in, golden particles",
-            output_dir="./animated",
-        )
-
-        # Batch with progress callback
-        def progress(result, idx, total):
-            print(f"[{idx+1}/{total}] {'✅' if result.succeeded else '❌'} {result.prompt[:40]}")
-
-        batch = await client.batch_generate(
-            "prompts.txt",
-            mode=GenerationMode.IMAGE,
-            output_dir="./gallery",
-            on_result=progress,
-        )
-        print(f"Done: {batch.completed}/{batch.total}")
-
-        # Streaming batch
-        async for result in client.stream_batch("prompts.txt", mode=GenerationMode.VIDEO):
-            print(result.primary_file)
-
-asyncio.run(main())
-```
-
----
-
-## Configuration
-
-```bash
-flow config show
-flow config set headless false           # Show browser window
-flow config set default_output_dir ~/Desktop/flow-output
-flow config set generation_timeout_s 600
-flow config set inter_prompt_delay_s 3.0
-```
-
-Config is stored in `~/.flow-py/config.json`.
-
----
-
-## How It Works
-
-1. **Auth**: Playwright opens a persistent Chromium profile at `~/.flow-py/browser-profile/`. Google session cookies persist across runs — no re-login needed.
-2. **Mode switching**: Clicks the appropriate tab in Flow's UI (Create Image / Text-to-Video / Frame-to-Video).
-3. **Prompt**: Fills the textarea and clicks Generate.
-4. **Wait**: Polls the DOM gallery for new items, also intercepts `storage.googleapis.com` network responses to capture media URLs directly.
-5. **Download**: Downloads via intercepted URL (aiohttp) or by clicking the download button.
-
----
-
-## Troubleshooting
-
-| Problem | Solution |
+| Value | Description |
 |---|---|
-| `Auth error: Not logged in` | Run `flow login` |
-| `No active project` | Run `flow projects create` or `flow login` (which auto-captures project) |
-| Generation times out | Run with `--no-headless` to watch what's happening |
-| Policy rejection | Revise your prompt |
-| UI changed / selector failed | Open an issue — selectors may need updating |
+| `dolly-in` / `dolly-out` | Camera moves toward / away from subject |
+| `orbit-left` / `orbit-right` | Orbital pan around subject |
+| `orbit-up` / `orbit-low` | Orbital tilt |
+| `dolly-zoom-in` / `dolly-zoom-out` | Hitchcock effect |
+| `pan-left` / `pan-right` | Horizontal pan |
+| `tilt-up` / `tilt-down` | Vertical tilt |
+| `crane-up` / `crane-down` | Vertical lift |
+
+## Camera Positions
+
+| Value | Description |
+|---|---|
+| `center` | Stationary center |
+| `left` / `right` | Offset left / right |
+| `higher` / `lower` | Offset up / down |
+| `closer` / `further` | Offset closer / further |
 
 ---
 
-## License
+## Models
 
-MIT. Not affiliated with Google.
+| Model | Type | Cost |
+|---|---|---|
+| `veo_3_1_t2v_fast` | T2V | 20–100 cr |
+| `veo_3_1_upsampler_1080p` | Upscale | **FREE** |
+| `veo_3_1_extend_fast_landscape` | Extend | 20 cr |
+| `veo_3_1_r2v_fast_landscape` | Multi-ref | 20 cr |
+| `veo_3_0_reshoot_landscape` | Camera | 20 cr |
+| `veo_2_0_object_insertion_landscape` | Insert | 20 cr |
+| `veo_2_0_object_removal_landscape` | Remove | 20 cr |
+| `nano_banana_2` / `imagen` | T2I | varies |
 
 ---
 
-## Test Results (Confirmed Working)
+## Batch Prompts File
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| T2V (Text → Video) | ✅ CONFIRMED | `veo_3_1_t2v_fast`, 20-100cr |
-| T2I (Text → Image) | ✅ CONFIRMED | `Nano Banana 2` / `Imagen`, 45-60s sync |
-| I2V (Image → Video) | ✅ CONFIRMED | Frame-to-video pipeline |
-| Extend Video | ✅ CONFIRMED | `veo_3_1_extend_fast_landscape` |
-| Extend Loop | ⏳ Ready | Sequential extend N times |
-| Upscale | ✅ CONFIRMED | `veo_3_1_upsampler_1080p`, **FREE (0cr)** |
-| Camera Motion | ✅ CONFIRMED | Dolly/Orbit variants |
-| Camera Position | ✅ CONFIRMED | Stationary_* presets |
-| Insert Object | ✅ CONFIRMED | `veo_2_0_object_insertion_landscape` |
-| Remove Object | ✅ CONFIRMED | Requires mask image |
-| Multi-Reference (R2V) | ✅ Ready | `veo_3_1_r2v_fast_*` |
+```
+# Plain text (blank-line separated)
+A golden Buddha on a lotus throne, divine rays
+
+Subhuti meditating, white hair, golden light
+
+# Tagged blocks
+[V1-S1] Establishing wide shot of golden pagoda
+
+[V1-S2] Close-up of lotus petals opening at dawn
+
+# Image→Video pipeline (image_prompt ||| video_prompt)
+[V1-S1] Golden Buddha statue ||| Slow zoom-in with particles rising
+```
 
 ---
 
 ## Known Limitations
 
-1. **reCAPTCHA Enterprise**: All generation endpoints require valid reCAPTCHA tokens. Direct API calls return 403. Must use UI automation (Playwright) to click real UI buttons.
-
-2. **CDP Connection**: For development, connect to existing Chrome at `http://127.0.0.1:9222` to bypass login. Production use requires full browser launch.
-
-3. **Image Generation Timeout**: T2I is synchronous and takes 45-60 seconds. Default timeout is 120s.
-
-4. **Settings Panel**: The mode switch (Video ↔ Image) via settings pill can be unreliable. Workaround: click an image thumbnail to enter image edit mode first.
+1. **reCAPTCHA** — all generation ops require real browser clicks; headless automation may fail
+2. **Session required** — must be logged in via `flow login` or attach to an existing Chrome CDP session
+3. **Image generation** — T2I is synchronous, takes 45–60 seconds
+4. **Settings panel** — switching Video ↔ Image mode via the UI pill can be unreliable; workaround: click an image thumbnail first
 
 ---
 
@@ -251,26 +239,29 @@ MIT. Not affiliated with Google.
 
 ```
 flow/
-├── _api.py           # Direct API calls (read-only ops)
-├── _browser.py       # BrowserManager (Playwright + CDP)
-├── _client.py        # FlowClient (main API)
-├── _exceptions.py    # Custom exceptions
-├── _flow_ui.py       # UI automation (clicks, fills, etc.)
-├── _ui_interceptor.py# Network interceptor for API calls
+├── _api.py            # Direct API calls (read-only: credits, poll, config)
+├── _browser.py        # BrowserManager — Playwright launch + CDP attach
+├── _client.py         # FlowClient — main public API
+├── _exceptions.py     # Custom exceptions (AuthError, GenerationTimeout…)
+├── _flow_ui.py        # UI automation (click Extend, fill prompt, draw mask…)
+├── _ui_interceptor.py # Network interceptor — captures reCAPTCHA-signed calls
+├── _models.py         # Dataclasses: VideoJob, GeneratedImage, BatchResult…
+├── _storage.py        # Config persistence (~/.flow/config.json)
+├── _downloader.py     # Media download helpers
 ├── cli/
-│   └── main.py       # Click-based CLI (23 commands)
-└── __init__.py       # Public exports
+│   └── main.py        # Click-based CLI (23 commands)
+└── __init__.py        # Public exports
 ```
 
 ---
 
 ## Credits
 
-- Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py)
+- Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py) by teng-lin
 - Google Flow AI: https://labs.google/fx/tools/flow
 
 ---
 
 ## License
 
-MIT License — see LICENSE file.
+[MIT License](LICENSE) — see LICENSE file.
