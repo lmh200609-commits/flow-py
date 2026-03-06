@@ -17,7 +17,8 @@ Quick start::
     asyncio.run(main())
 """
 
-from ._client import FlowClient
+from ._client import FlowClient, CAMERA_MOTIONS, CAMERA_POSITIONS
+from ._ui_interceptor import UIInterceptor, CapturedCall
 from ._exceptions import (
     AuthError,
     DownloadError,

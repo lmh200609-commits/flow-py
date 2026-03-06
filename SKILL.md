@@ -1,6 +1,11 @@
-# flow-py Skill
+---
+name: flow
+description: Google Flow AI CLI and Python SDK for generating videos and images with Veo 3.1, Imagen, and all editing features. Commands: flow video, flow image, flow extend, flow extend-loop, flow camera, flow camera-pos, flow insert, flow remove, flow upscale, flow credits, flow models, flow poll, flow download, flow batch-images, flow batch-videos.
+---
 
-Automate Google Flow AI (labs.google/fx) image and video generation via the `flow` CLI or Python API.
+# Flow AI Skill
+
+Automate Google Flow AI (labs.google/fx) for video and image generation.
 
 ## Installation
 
@@ -8,203 +13,151 @@ Automate Google Flow AI (labs.google/fx) image and video generation via the `flo
 bash ~/.openclaw/workspace/skills/flow-py/install.sh
 ```
 
-First-time auth (one-time per machine):
+## Quick Start
+
 ```bash
-flow login
+flow credits                                    # Check balance
+flow video "golden sunset over temple" --wait   # Text to Video (Veo 3.1)
+flow image "serene lotus pond" -n 4             # Text to Image (x4)
+flow extend <media_id> -w <workflow_id>         # Extend a video
+flow extend-loop <media_id> -n 10 -w <wid>     # Make 10x longer video!
+flow upscale <media_id> -w <wid>                # Free 1080p upscale
 ```
-This opens a browser window. Sign into Google, navigate to Flow, then press ENTER in the terminal.
 
-## When to Use This Skill
+## All Commands
 
-Use `flow` (CLI) or `FlowClient` (Python) when:
-- Generating AI images in bulk from text prompts (Imagen / Nano Banana Pro)
-- Generating AI videos from text prompts (Veo)
-- Converting static images to animated videos (Frame-to-Video)
-- Running image→video pipelines from a prompts file
-- Automating any batch workflow on Google Flow AI
-
-Do **not** use this skill for:
-- NotebookLM (use `notebooklm` CLI)
-- Non-Flow AI image generation (use other tools)
-
-## CLI Commands
-
-### One-off generation
+### Auth & Config
 ```bash
-# Image
-flow generate image "golden Buddha on lotus throne, divine rays, 8K"
-flow generate image "cherry blossoms" --aspect 9:16 --output ~/Desktop/imgs
-
-# Video (Veo, 30-90s generation time)
-flow generate video "aurora borealis, cinematic time-lapse"
-flow generate video "temple bells, slow motion" --duration 5s --aspect 9:16
-
-# Animate a still image
-flow generate frame slide.png "slow zoom-in with golden particles"
-flow generate frame image.jpg "gentle orbit left, wind in trees" --duration 5s
+flow login                      # Open browser for Google auth
+flow logout                     # Clear browser session
+flow config                     # Show current configuration
+flow use <project_id>           # Set active project
+flow projects                   # List saved projects
+flow workflows                  # List workflows in active project
 ```
 
-### Batch mode (most common for pipelines)
+### Generation
 ```bash
-# Process a prompts file
-flow batch prompts.txt --mode image --output-dir ./gallery
+# Text to Video (Veo 3.1)
+flow video "prompt" [options]
+  -p, --project <id>           # Override project
+  -m, --model "Veo 3.1 - Fast" # Model display name
+  -a, --aspect landscape|portrait
+  -n, --count 1-4
+  --start <image_path>         # Image-to-Video mode
+  --wait / --no-wait
+  -o, --output <dir>
+  --cdp                        # Use existing Chrome (port 9222)
 
-# Video batch
-flow batch prompts.txt --mode video --output-dir ./videos
+# Text to Image (Imagen / Nano Banana)
+flow image "prompt" [options]
+  -a, --aspect landscape|portrait|square
+  -n, --count 1-4
+  -o, --output <dir>
 
-# Pipeline mode (image||| syntax auto-detected)
-flow batch pipeline.txt
+# Image to Video (Frames mode)
+flow frames <image_path> [options]
+  -p, --prompt "motion description"
+  -a, --aspect landscape|portrait
 ```
 
-### Project management
+### Video Editing (requires media_id + workflow_id)
 ```bash
-flow projects list         # Show known projects
-flow projects create       # Create a new project
-flow projects use <id>     # Switch project
-flow status                # Check auth + config
+# Extend video
+flow extend <media_id> -w <workflow_id> [options]
+  -p, --prompt "what happens next"
+  --wait / --no-wait
+
+# Extend N times (infinite video!)
+flow extend-loop <media_id> -w <wid> [options]
+  -n, --iterations 5
+  -p, --prompt "steady push forward"
+  -o, --output <dir>
+
+# Camera motion
+flow camera <media_id> -w <wid> --motion <type>
+  Types: dolly_in, dolly_out, orbit_left, orbit_right,
+         orbit_up, orbit_low, dolly_zoom_in, dolly_zoom_out
+
+# Camera position
+flow camera-pos <media_id> -w <wid> --position <pos>
+  Positions: center, left, right, high, low, closer, further
+
+# Insert object
+flow insert <media_id> -w <wid> -t "golden lotus flower"
+
+# Remove object
+flow remove <media_id> -w <wid> --x 0.5 --y 0.5
+
+# Upscale (FREE!)
+flow upscale <media_id> -w <wid> [-r 1080p|4k]
 ```
 
-### Config
+### Status & Download
 ```bash
-flow config show
-flow config set headless false            # Watch browser (debugging)
-flow config set generation_timeout_s 600  # Longer timeout for slow runs
-flow config set inter_prompt_delay_s 3    # Pause between prompts
+flow poll <media_id>             # Check generation status
+flow poll <media_id> --wait      # Wait until complete
+flow download <media_id> -o .    # Download video/image
+flow download-all [-w wid] -o .  # Download all from workflow
 ```
 
-## Prompts File Format
-
-Create a text file, e.g. `prompts.txt`:
-
-```
-# Comments start with #
-
-[V1-S1] Establishing wide shot of golden Buddha on lotus throne, celestial clouds
-
-[V1-S2] Close-up of Subhuti with white hair, contemplative expression
-
-[V1-S3] Grand temple exterior, cherry blossoms, golden hour
+### Batch Operations
+```bash
+flow batch-images prompts.txt -n 4 -o ./gallery
+flow batch-videos prompts.txt -o ./videos
 ```
 
-**Pipeline mode** (image → video in one batch):
-```
-[V1-S1] Golden Buddha on lotus throne ||| Slow zoom-in with golden particles rising
-[V1-S2] Subhuti meditating, white hair ||| Gentle camera orbit, wind stirring robes
-```
-
-## Python API (for agents/scripts)
-
-```python
-import asyncio
-from flow import FlowClient, GenerationMode, AspectRatio
-
-async def main():
-    async with await FlowClient.create() as client:
-
-        # Single image
-        r = await client.generate_image(
-            "golden Buddha, celestial light",
-            output_dir="./outputs",
-            aspect_ratio=AspectRatio.PORTRAIT,
-        )
-        print(r.primary_file)  # Path to downloaded PNG
-
-        # Single video
-        r = await client.generate_video(
-            "aurora borealis, cinematic",
-            output_dir="./videos",
-        )
-
-        # Frame-to-video
-        r = await client.generate_frame_to_video(
-            image_path="./slide.png",
-            prompt="slow zoom, particles rise",
-            output_dir="./animated",
-        )
-
-        # Batch
-        batch = await client.batch_generate(
-            "prompts.txt",
-            mode=GenerationMode.IMAGE,
-            output_dir="./gallery",
-        )
-        print(f"{batch.completed}/{batch.total} succeeded")
-
-        # Streaming batch (real-time progress)
-        async for result in client.stream_batch("prompts.txt"):
-            print("✅" if result.succeeded else "❌", result.prompt[:50])
-
-asyncio.run(main())
+### Info
+```bash
+flow credits                    # Show credits remaining
+flow models                     # List all models with costs
+flow models --json              # Full model config as JSON
 ```
 
-## Troubleshooting
+## Architecture
 
-| Error | Fix |
-|---|---|
-| `Auth error` | Run `flow login` |
-| `No active project` | Run `flow projects create` or `flow login` |
-| Timeout | Run with `--no-headless` to see what's happening; or `flow config set generation_timeout_s 600` |
-| Policy rejection | Revise the prompt |
-| Selector failed (UIError) | Flow UI may have changed; check `flow --debug generate image "test"` |
-
-## Architecture Overview
+All generation commands use UI automation + network interception to bypass
+reCAPTCHA Enterprise score requirements. Read-only commands (credits, poll,
+models) use the direct REST API.
 
 | File | Purpose |
 |---|---|
-| `flow/__init__.py` | Package exports, public API surface |
-| `flow/_models.py` | Data models (enums, dataclasses), prompt file parser |
-| `flow/_exceptions.py` | Exception hierarchy (FlowError, AuthError, PolicyError, etc.) |
-| `flow/_storage.py` | `~/.flow-py/` config + project persistence (JSON) |
-| `flow/_browser.py` | Playwright browser lifecycle manager, persistent context |
-| `flow/_client.py` | Main async `FlowClient` API (generate, batch, project mgmt) |
-| `flow/_downloader.py` | Robust media downloader (URL extraction + aiohttp download) |
-| `flow/_gallery.py` | `GalleryWatcher`: DOM snapshot, wait-for-new, latest media src |
-| `flow/_flow_ui.py` | `FlowUI`: High-level UI selectors/interactions for Flow |
-| `flow/cli/main.py` | Click CLI root, login/batch/projects/config/status commands |
-| `flow/cli/_generate.py` | `generate image/video/frame` subcommands (refactored) |
-| `tests/test_models.py` | Tests for models, prompt parser, safe_filename |
-| `tests/test_storage.py` | Tests for config/project persistence |
+| `flow/_api.py` | Direct REST API client (all endpoints) |
+| `flow/_browser.py` | Playwright browser lifecycle (persistent + CDP) |
+| `flow/_client.py` | High-level FlowClient combining API + UI + interceptor |
+| `flow/_flow_ui.py` | UI automation (selectors, clicks, form filling) |
+| `flow/_ui_interceptor.py` | Network request/response capture |
+| `flow/_models.py` | Data models, enums, prompt file parser |
+| `flow/_exceptions.py` | Exception hierarchy |
+| `flow/_storage.py` | Config + project persistence (~/.flow-py/) |
+| `flow/cli/main.py` | Click CLI with all commands |
 
-### Key design patterns
-- **Persistent Playwright context**: Session cookies survive across CLI runs (no re-login)
-- **Multiple selector strategies**: Each UI method tries aria-label, role, text, CSS class, then JS fallback
-- **Response interception**: Captures `storage.googleapis.com` URLs during generation for direct download
-- **Gallery polling**: Watches DOM for new items after clicking Generate
-- **Pipeline mode**: `|||` syntax in prompt files chains image generation -> frame-to-video animation
+## Python API
 
-## Troubleshooting (Extended)
+```python
+import asyncio
+from flow import FlowClient
 
-| Problem | Cause | Fix |
-|---|---|---|
-| `Auth error: Not logged in` | No session cookies | Run `flow login` |
-| `No active project` | Config missing project | Run `flow projects create` or `flow login` |
-| Generation times out | Slow network or UI changed | `flow config set generation_timeout_s 600`; try `--no-headless` |
-| Policy rejection | Google content filter | Revise the prompt text |
-| UI changed / selector failed | Flow UI updated | Update selectors in `_flow_ui.py`; check with `--debug` |
-| `input()` blocks event loop | Bug in async code | Fixed: uses `run_in_executor` |
-| Import errors on CLI | Package not installed | Run `pip3 install -e ".[dev]"` |
-| `asyncio.run()` nesting | Calling from inside event loop | CLI uses sync Click commands that call `asyncio.run()` correctly |
-| Download fails but URL intercepted | GCS URL expired | Increase `download_timeout_s` in config |
+async def main():
+    async with await FlowClient.create(
+        project_id="4f3c93f5-...",
+        cdp_url="http://127.0.0.1:9222",
+    ) as client:
+        # Credits
+        credits = await client.get_credits()
+        print(f"Credits: {credits.credits}")
 
-## Integration with Buddhist Video Pipeline
+        # Generate video
+        jobs = await client.generate_video("golden lotus at dawn")
+        status = await client.wait_for_video(jobs[0])
+        await client.download(status.fife_url, "output.mp4")
 
-For 大般若经 video slides, use batch mode with 9:16 portrait images:
+        # Extend loop (infinite video!)
+        extensions = await client.extend_loop(
+            media_id, workflow_id, iterations=10,
+            prompt="camera slowly pushes forward",
+            output_dir="./extended",
+        )
 
-```bash
-# Generate slide images for one volume
-flow batch /tmp/vol_042_prompts.txt \
-    --mode image \
-    --aspect 9:16 \
-    --output-dir ~/Desktop/Vol042-slides
-
-# Then animate key slides to video
-flow batch /tmp/vol_042_pipeline.txt \
-    --output-dir ~/Desktop/Vol042-videos
-```
-
-Example prompt format for Buddhist slides:
-```
-[S1] 《大般若波罗蜜多经》第四十二卷，金色佛光，莲花宝座，庄严法界
-
-[S2] 须菩提合掌问法，白发长者，金色光芒萦绕，禅定深处
+asyncio.run(main())
 ```
