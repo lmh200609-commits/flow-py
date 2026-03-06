@@ -21,6 +21,7 @@ from ._exceptions import (
     PolicyError,
     UIError,
 )
+from ._flow_ui import FlowUI
 from ._models import (
     AspectRatio,
     BatchResult,
@@ -42,46 +43,6 @@ from ._storage import (
 )
 
 log = logging.getLogger(__name__)
-
-# ─────────────────────────────────────────────
-#  UI Selectors (resilient multi-strategy sets)
-# ─────────────────────────────────────────────
-
-# Mode tab labels as Flow shows them
-_MODE_LABELS = {
-    GenerationMode.IMAGE: ["Create Image", "Image", "Imagen"],
-    GenerationMode.VIDEO: ["Text-to-Video", "Video", "Generate Video"],
-    GenerationMode.FRAME_TO_VIDEO: ["Frame-to-Video", "Image-to-Video", "Frame to Video"],
-}
-
-# Gallery item selectors
-_GALLERY_SELECTORS = [
-    "[data-index]",
-    ".gallery-item",
-    ".result-item",
-    "[class*='gallery'] img",
-    "[class*='result'] img",
-    "img[src*='storage.googleapis.com']",
-    "video[src*='storage.googleapis.com']",
-]
-
-# Download button selectors
-_DOWNLOAD_SELECTORS = [
-    "button[aria-label*='download' i]",
-    "button[aria-label*='Download' i]",
-    "[title*='download' i]",
-    "button:has(svg[data-icon*='download'])",
-    "a[download]",
-]
-
-# Policy / error indicators
-_POLICY_TEXTS = [
-    "violates our policy",
-    "content policy",
-    "harmful or unsafe",
-    "unable to generate",
-    "request was flagged",
-]
 
 
 class FlowClient:
@@ -105,6 +66,7 @@ class FlowClient:
     def __init__(self, browser: BrowserManager, config: FlowConfig):
         self._browser = browser
         self._config = config
+        self._flow_ui = FlowUI()
 
     # ------------------------------------------------------------------
     # Factory
@@ -156,10 +118,20 @@ class FlowClient:
         except EOFError:
             pass
 
-        # Capture project URL
+        # Auto-detect project URL: poll page.url for up to 30s
+        project_id = None
         current_url = page.url
-        if "flow/project/" in current_url:
-            project_id = current_url.rstrip("/").split("/")[-1]
+        if "/project/" not in current_url:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                current_url = page.url
+                if "/project/" in current_url:
+                    break
+                await asyncio.sleep(1)
+
+        m = re.search(r"/project/([^/?#]+)", current_url)
+        if m:
+            project_id = m.group(1)
             set_active_project(project_id, current_url)
             add_project(project_id, "Default", current_url)
             print(f"✅ Logged in. Active project: {project_id}")
@@ -198,16 +170,27 @@ class FlowClient:
         await self._browser.navigate_to_flow()
         await asyncio.sleep(2)
 
-        # Look for a "New project" or "+" button
-        for btn_text in ("New project", "New Project", "Create project", "+", "New"):
-            btn = page.get_by_role("button", name=btn_text)
-            if await btn.count() > 0:
-                await btn.first.click()
-                await asyncio.sleep(2)
-                break
+        # Click "New project" link/button
+        new_btn = page.get_by_text("New project").first
+        if await new_btn.count() > 0:
+            await new_btn.click()
+        else:
+            # Fallback: try other button texts
+            for btn_text in ("New Project", "Create project", "+", "New"):
+                btn = page.get_by_role("button", name=btn_text)
+                if await btn.count() > 0:
+                    await btn.first.click()
+                    break
 
-        # After creation, URL should contain /project/
+        # Wait for URL to contain /project/
+        deadline = time.monotonic() + 15
         current = page.url
+        while time.monotonic() < deadline:
+            current = page.url
+            if "/project/" in current:
+                break
+            await asyncio.sleep(1)
+
         m = re.search(r"/project/([^/?#]+)", current)
         if not m:
             raise UIError("Could not detect new project URL after creation")
@@ -233,67 +216,6 @@ class FlowClient:
         log.info("Active project set to %s", project_id)
 
     # ------------------------------------------------------------------
-    # Mode switching
-    # ------------------------------------------------------------------
-
-    async def _switch_mode(self, page, mode: GenerationMode) -> None:
-        """Click the appropriate mode tab in the Flow UI."""
-        labels = _MODE_LABELS[mode]
-        for label in labels:
-            # Try role=tab first
-            el = page.get_by_role("tab", name=label)
-            if await el.count() > 0:
-                await el.first.click()
-                await asyncio.sleep(0.5)
-                log.debug("Switched to mode %s via tab '%s'", mode, label)
-                return
-            # Try role=button
-            el = page.get_by_role("button", name=label)
-            if await el.count() > 0:
-                await el.first.click()
-                await asyncio.sleep(0.5)
-                log.debug("Switched to mode %s via button '%s'", mode, label)
-                return
-        log.warning("Could not find mode tab for %s — proceeding anyway", mode)
-
-    # ------------------------------------------------------------------
-    # Gallery snapshot helpers
-    # ------------------------------------------------------------------
-
-    async def _count_gallery_items(self, page) -> int:
-        """Count current gallery items using multiple selector strategies."""
-        for sel in _GALLERY_SELECTORS:
-            count = await page.locator(sel).count()
-            if count > 0:
-                return count
-        return 0
-
-    async def _wait_for_new_item(
-        self,
-        page,
-        before_count: int,
-        timeout_s: int,
-        poll_interval: float = 1.5,
-    ) -> int:
-        """Wait until gallery item count exceeds before_count. Returns new count."""
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            # Check for policy error
-            body_text = await page.evaluate("() => document.body.innerText")
-            for policy_str in _POLICY_TEXTS:
-                if policy_str.lower() in body_text.lower():
-                    raise PolicyError("(prompt)")
-
-            count = await self._count_gallery_items(page)
-            if count > before_count:
-                log.debug("Gallery grew from %d to %d", before_count, count)
-                return count
-
-            await asyncio.sleep(poll_interval)
-
-        raise GenerationTimeout(timeout_s)
-
-    # ------------------------------------------------------------------
     # Download helpers
     # ------------------------------------------------------------------
 
@@ -308,52 +230,6 @@ class FlowClient:
                         await f.write(chunk)
         log.debug("Saved media to %s", output_path)
         return output_path
-
-    async def _download_latest_item(
-        self,
-        page,
-        output_path: Path,
-        mode: GenerationMode,
-    ) -> Optional[Path]:
-        """Try to download the most recently generated item."""
-        # Strategy 1: Intercept src URL from the newest gallery element
-        media_src = await page.evaluate(f"""
-            () => {{
-                // Find media elements sorted by their position (last = newest)
-                const imgs = [...document.querySelectorAll('img[src*="storage.googleapis.com"]')];
-                const vids = [...document.querySelectorAll('video[src*="storage.googleapis.com"]')];
-                const els  = [...imgs, ...vids];
-                if (!els.length) return null;
-                return els[els.length - 1].src || els[els.length - 1].currentSrc;
-            }}
-        """)
-
-        if media_src:
-            # Determine extension from URL or mode
-            ext = _ext_for_url(media_src, mode)
-            final_path = output_path.with_suffix(ext)
-            try:
-                return await self._download_media_url(media_src, final_path)
-            except Exception as e:
-                log.warning("Direct URL download failed: %s", e)
-
-        # Strategy 2: Click download button on last gallery item
-        try:
-            last_item = page.locator("[data-index]").last
-            # Hover to reveal download button
-            await last_item.hover()
-            await asyncio.sleep(0.5)
-            download_btn = last_item.locator("button[aria-label*='download' i]").first
-            if await download_btn.count() > 0:
-                ext = ".mp4" if mode in (GenerationMode.VIDEO, GenerationMode.FRAME_TO_VIDEO) else ".png"
-                final_path = output_path.with_suffix(ext)
-                return await self._browser.click_and_download(
-                    page, "button[aria-label*='download' i]", final_path
-                )
-        except Exception as e:
-            log.warning("Download button strategy failed: %s", e)
-
-        return None
 
     # ------------------------------------------------------------------
     # Core generation: single prompt
@@ -375,107 +251,87 @@ class FlowClient:
 
         page = await self._browser.page()
 
-        # Switch mode
-        await self._switch_mode(page, mode)
-        await asyncio.sleep(0.8)
-
-        # For frame-to-video: upload the source image first
-        if mode == GenerationMode.FRAME_TO_VIDEO and frame_image_path:
-            await self._upload_frame_image(page, frame_image_path)
-            await asyncio.sleep(1)
-
-        # Fill prompt
-        await self._browser.fill_textarea(page, prompt)
-        await asyncio.sleep(0.3)
-
-        # Snapshot gallery before
-        before_count = await self._count_gallery_items(page)
-
-        # Intercept media URLs while generating
-        intercepted_urls: list[str] = []
+        # Intercept GCS media URLs
+        intercepted: list[str] = []
 
         def on_response(resp):
-            url = resp.url
-            if (
-                "storage.googleapis.com" in url
-                and resp.status == 200
-                and url not in intercepted_urls
-            ):
-                intercepted_urls.append(url)
+            if "storage.googleapis.com" in resp.url and resp.status == 200:
+                if resp.url not in intercepted:
+                    intercepted.append(resp.url)
 
         page.on("response", on_response)
 
         try:
-            # Click generate
-            await self._browser.click_generate(page)
-            log.info("Generation started: %s… [%s]", prompt[:60], mode.value)
+            # For frame-to-video: upload image first, then switch to Video mode
+            if mode == GenerationMode.FRAME_TO_VIDEO and frame_image_path:
+                await self._flow_ui.upload_image(page, frame_image_path)
+                await asyncio.sleep(1)
+
+            # Open settings and configure
+            await self._flow_ui.open_settings_panel(page)
+            await self._flow_ui.switch_mode(page, mode)
+            await self._flow_ui.set_aspect_ratio(page, aspect_ratio)
+            if count > 1:
+                await self._flow_ui.set_count(page, count)
+
+            # Snapshot gallery count before
+            before_count = await self._flow_ui.count_gallery_items(page)
+
+            # Fill and submit
+            await self._flow_ui.fill_prompt(page, prompt)
+            await asyncio.sleep(0.3)
+            await self._flow_ui.click_submit(page)
+
+            log.info("Submitted prompt: %s [%s]", prompt[:60], mode.value)
 
             # Wait for new gallery item
-            await self._wait_for_new_item(
-                page,
-                before_count,
-                self._config.generation_timeout_s,
-            )
+            timeout = self._config.generation_timeout_s
+            deadline = time.monotonic() + timeout
+            new_count = before_count
+            while time.monotonic() < deadline:
+                if await self._flow_ui.check_policy_error(page):
+                    raise PolicyError(prompt)
+                new_count = await self._flow_ui.count_gallery_items(page)
+                if new_count > before_count:
+                    break
+                await asyncio.sleep(2)
+            else:
+                raise GenerationTimeout(timeout)
 
             result.status = GenerationStatus.COMPLETE
             result.elapsed_s = time.monotonic() - t0
-
-            # Collect intercepted URLs
-            result.media_urls = list(intercepted_urls)
+            result.media_urls = list(intercepted)
 
             # Download
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            dl = await self._download_latest_item(page, output_path, mode)
-            if dl:
-                result.file_paths.append(dl)
+            src = await self._flow_ui.get_newest_media_src(page)
+            if src:
+                ext = _ext_for_url(src, mode)
+                dl_path = output_path.with_suffix(ext)
+                try:
+                    await self._download_media_url(src, dl_path)
+                    result.file_paths.append(dl_path)
+                    log.info("Downloaded to %s", dl_path)
+                except Exception as e:
+                    log.warning("Direct download failed: %s", e)
+                    # Fallback: click download button
+                    await self._flow_ui.click_download_on_newest(page)
 
-        except PolicyError as e:
+        except PolicyError:
             result.status = GenerationStatus.POLICY_REJECTED
-            result.error = str(e)
-            log.warning("Policy rejection for prompt: %s", prompt[:60])
+            result.error = "Content policy rejection"
         except GenerationTimeout as e:
             result.status = GenerationStatus.FAILED
             result.error = str(e)
-            log.error("Timeout for prompt: %s", prompt[:60])
         except Exception as e:
             result.status = GenerationStatus.FAILED
             result.error = str(e)
             log.error("Generation error: %s", e, exc_info=True)
         finally:
             page.remove_listener("response", on_response)
+            result.elapsed_s = result.elapsed_s or (time.monotonic() - t0)
 
-        result.elapsed_s = result.elapsed_s or (time.monotonic() - t0)
         return result
-
-    async def _upload_frame_image(self, page, image_path: str) -> None:
-        """Upload a local image for frame-to-video generation."""
-        # Look for file input
-        file_input = page.locator("input[type='file']").first
-        if await file_input.count() > 0:
-            await file_input.set_input_files(image_path)
-            await asyncio.sleep(1)
-            return
-
-        # Try drag-and-drop zone
-        upload_zone_selectors = [
-            "[aria-label*='upload' i]",
-            "[class*='upload']",
-            "[class*='drop']",
-        ]
-        for sel in upload_zone_selectors:
-            zone = page.locator(sel).first
-            if await zone.count() > 0:
-                await zone.click()
-                await asyncio.sleep(0.5)
-                # After click, a file chooser should appear
-                async with page.expect_file_chooser() as fc_info:
-                    await zone.click()
-                fc = await fc_info.value
-                await fc.set_files(image_path)
-                await asyncio.sleep(1)
-                return
-
-        log.warning("Could not find upload element for frame image")
 
     # ------------------------------------------------------------------
     # Public generation APIs
