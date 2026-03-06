@@ -95,15 +95,15 @@ class FlowUI:
         return False
 
     async def _settings_visible(self, page) -> bool:
-        """Check if Image/Video selector buttons are visible."""
-        img_btn = page.get_by_role("button", name="Image", exact=True)
-        vid_btn = page.get_by_role("button", name="Video", exact=True)
-        img_vis = await img_btn.count() > 0
-        vid_vis = await vid_btn.count() > 0
-        if not img_vis:
-            # Try with icon prefix in text
-            img_vis = await page.locator("button").filter(has_text="Image").count() > 0
-        return img_vis or vid_vis
+        """Check if the settings panel is open (mode tabs are visible).
+
+        IMPORTANT: must use [role=tab] not button[has_text=Image] because
+        the gallery has 'Generated image' buttons that would false-positive.
+        """
+        count = await page.evaluate(
+            "() => document.querySelectorAll('[role=tab]').length"
+        )
+        return count > 0
 
     # ------------------------------------------------------------------
     # Mode switching

@@ -36,6 +36,9 @@ class BrowserManager:
 
     Uses ``launch_persistent_context`` so Google session cookies survive
     across CLI invocations (no re-login needed after initial ``flow login``).
+
+    Can also be created from an existing CDP endpoint (e.g., OpenClaw's
+    headless Chrome) via ``BrowserManager.from_cdp()``.
     """
 
     def __init__(
@@ -43,15 +46,35 @@ class BrowserManager:
         headless: bool = True,
         profile_dir: Optional[Path] = None,
         slow_mo: int = 0,
+        *,
+        cdp_url: Optional[str] = None,   # e.g. "http://127.0.0.1:9222"
     ):
         self.headless = headless
         self.profile_dir = profile_dir or PROFILE_DIR
         self.slow_mo = slow_mo
+        self.cdp_url = cdp_url           # if set, connect to existing Chrome via CDP
         self._pw: Optional[Playwright] = None
         self._ctx: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._cdp_browser = None         # CDP-connected browser handle
         # Collected download paths during this session
         self._downloads: list[Path] = []
+
+    @classmethod
+    def from_cdp(cls, cdp_url: str = "http://127.0.0.1:9222") -> "BrowserManager":
+        """Create a BrowserManager that connects to an existing Chrome instance via CDP.
+
+        This is useful when running inside OpenClaw where a Chrome session with
+        Google login cookies is already open (port 9222 by default).
+
+        Example::
+
+            bm = BrowserManager.from_cdp("http://127.0.0.1:9222")
+            await bm.start()
+            api = FlowAPI(bm, project_id)
+            credits = await api.get_credits()
+        """
+        return cls(cdp_url=cdp_url)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -60,30 +83,50 @@ class BrowserManager:
     async def start(self) -> "BrowserManager":
         ensure_dirs()
         self._pw = await async_playwright().start()
-        self._ctx = await self._pw.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            headless=self.headless,
-            slow_mo=self.slow_mo,
-            viewport={"width": 1440, "height": 900},
-            user_agent=_USER_AGENT,
-            accept_downloads=True,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-            ],
-        )
-        # Suppress "browser is being controlled by automated software" banner
-        await self._ctx.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+
+        if self.cdp_url:
+            # Connect to an already-running Chrome with existing session cookies
+            log.info("Connecting to existing Chrome via CDP: %s", self.cdp_url)
+            self._cdp_browser = await self._pw.chromium.connect_over_cdp(self.cdp_url)
+            contexts = self._cdp_browser.contexts
+            if not contexts:
+                raise AuthError(
+                    f"No browser contexts found at {self.cdp_url}. "
+                    "Make sure Chrome is running with --remote-debugging-port=9222."
+                )
+            self._ctx = contexts[0]
+            log.info("CDP connected: %d existing pages", len(self._ctx.pages))
+        else:
+            # Normal persistent profile launch
+            self._ctx = await self._pw.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=self.headless,
+                slow_mo=self.slow_mo,
+                viewport={"width": 1440, "height": 900},
+                user_agent=_USER_AGENT,
+                accept_downloads=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                ],
+            )
+            await self._ctx.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
         return self
 
     async def stop(self):
-        if self._ctx:
-            await self._ctx.close()
+        if self.cdp_url:
+            # For CDP connections: just disconnect, don't close the remote browser
+            if self._cdp_browser:
+                await self._cdp_browser.close()  # closes connection, not the browser
+        else:
+            if self._ctx:
+                await self._ctx.close()
         if self._pw:
             await self._pw.stop()
+        self._cdp_browser = None
         self._ctx = None
         self._pw = None
         self._page = None
@@ -105,13 +148,33 @@ class BrowserManager:
         return self._ctx
 
     async def page(self) -> Page:
-        """Return the active page, creating one if needed."""
-        if self._page is None or self._page.is_closed():
-            pages = self._ctx.pages
-            if pages:
-                self._page = pages[0]
-            else:
-                self._page = await self._ctx.new_page()
+        """Return the active page.
+
+        In CDP mode: prefers a page already on labs.google/fx (which has
+        reCAPTCHA loaded and Google session cookies active).
+        In normal mode: creates a new page if none exists.
+        """
+        if self._page is not None and not self._page.is_closed():
+            return self._page
+
+        pages = self._ctx.pages
+        if self.cdp_url and pages:
+            # In CDP mode, prefer an existing Flow page (reCAPTCHA already loaded)
+            for p in pages:
+                if "labs.google" in p.url:
+                    self._page = p
+                    log.debug("CDP page: using existing Flow tab %s", p.url[:60])
+                    return self._page
+            # Fall back to first non-blank page
+            for p in pages:
+                if p.url not in ("", "about:blank", "chrome://newtab/"):
+                    self._page = p
+                    return self._page
+
+        if pages:
+            self._page = pages[0]
+        else:
+            self._page = await self._ctx.new_page()
         return self._page
 
     # ------------------------------------------------------------------

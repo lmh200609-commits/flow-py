@@ -23,6 +23,28 @@ class GenerationError(FlowError):
     pass
 
 
+class InvalidArgumentError(GenerationError):
+    """Server returned 400 INVALID_ARGUMENT.
+    Usually means a field value is wrong (wrong media UUID, bad model key, etc.)."""
+    def __init__(self, message: str, status: int = 400):
+        self.http_status = status
+        super().__init__(message)
+
+
+class NotFoundError(GenerationError):
+    """Server returned 404 — endpoint or resource not found.
+    Some features (e.g. video upscale) may be deprecated or unavailable."""
+    def __init__(self, message: str):
+        self.http_status = 404
+        super().__init__(message)
+
+
+class FeatureUnavailableError(FlowError):
+    """A Flow feature is known to be unavailable via direct API.
+    May require the UI or a different approach."""
+    pass
+
+
 class PolicyError(FlowError):
     """Prompt was rejected by Google's content policy."""
 

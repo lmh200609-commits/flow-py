@@ -1,4 +1,4 @@
-"""Core async FlowClient — high-level API for Google Flow AI automation."""
+"""Core FlowClient — high-level interface combining browser auth + direct REST API."""
 from __future__ import annotations
 
 import asyncio
@@ -7,12 +7,24 @@ import re
 import time
 from pathlib import Path
 from typing import AsyncIterator, Optional
-from urllib.parse import urlparse
-
-import aiohttp
-import aiofiles
 
 from ._browser import BrowserManager, FLOW_BASE_URL
+from ._api import (
+    FlowAPI,
+    GeneratedImage,
+    VideoJob,
+    VideoStatus,
+    Credits,
+    Workflow,
+    IMAGE_MODEL_NARWHAL,
+    IMAGE_AR_PORTRAIT,
+    IMAGE_AR_LANDSCAPE,
+    IMAGE_AR_SQUARE,
+    VIDEO_MODEL_VEO31_FAST,
+    VIDEO_MODEL_VEO31_I2V,
+    VIDEO_AR_LANDSCAPE,
+    VIDEO_AR_PORTRAIT,
+)
 from ._exceptions import (
     AuthError,
     GenerationError,
@@ -21,7 +33,6 @@ from ._exceptions import (
     PolicyError,
     UIError,
 )
-from ._flow_ui import FlowUI
 from ._models import (
     AspectRatio,
     BatchResult,
@@ -44,46 +55,66 @@ from ._storage import (
 
 log = logging.getLogger(__name__)
 
+# Aspect ratio mapping
+_AR_MAP = {
+    AspectRatio.LANDSCAPE: (IMAGE_AR_LANDSCAPE, VIDEO_AR_LANDSCAPE),
+    AspectRatio.PORTRAIT:  (IMAGE_AR_PORTRAIT,  VIDEO_AR_PORTRAIT),
+    AspectRatio.SQUARE:    (IMAGE_AR_SQUARE,     VIDEO_AR_LANDSCAPE),  # square only for images
+}
+
 
 class FlowClient:
     """Async client for Google Flow AI.
 
-    Usage (async context manager)::
+    Combines Playwright browser (for auth + recaptcha) with direct REST API calls.
+
+    Quick start::
 
         async with await FlowClient.create() as client:
-            result = await client.generate_image("golden Buddha, celestial clouds")
-            print(result.file_paths)
+            # Text → Image
+            images = await client.generate_image("Golden Buddha, 8K")
+            print(images[0].file_paths)
 
-    Or for longer pipelines::
+            # Text → Video (Veo 3.1)
+            job, status = await client.generate_video_and_wait("Sunrise over lotus lake")
+            print(job.file_path)
 
-        client = await FlowClient.create()
-        try:
-            batch = await client.batch_generate("prompts.txt", mode=GenerationMode.IMAGE)
-        finally:
-            await client.close()
+            # Image → Video (upload first)
+            job, status = await client.image_to_video("source.png", "slow zoom with golden light")
     """
 
-    def __init__(self, browser: BrowserManager, config: FlowConfig):
-        self._browser = browser
-        self._config = config
-        self._flow_ui = FlowUI()
+    def __init__(self, browser: BrowserManager, config: FlowConfig, project_id: str = ""):
+        self._browser    = browser
+        self._config     = config
+        self._project_id = project_id
 
-    # ------------------------------------------------------------------
-    # Factory
-    # ------------------------------------------------------------------
+        # Direct REST API client
+        self._api = FlowAPI(
+            browser_manager  = browser,
+            project_id       = project_id,
+            poll_interval_s  = 5.0,
+            default_timeout_s = config.generation_timeout_s,
+        )
+
+    # ── Factory ───────────────────────────────────────────────────────────────
 
     @classmethod
     async def create(
         cls,
-        headless: Optional[bool] = None,
-        config: Optional[FlowConfig] = None,
+        headless:  Optional[bool]        = None,
+        config:    Optional[FlowConfig]  = None,
+        project_id: Optional[str]        = None,
     ) -> "FlowClient":
-        """Create and start a FlowClient (starts the browser)."""
-        cfg = config or load_config()
-        hless = headless if headless is not None else cfg.headless
+        """Create and start a FlowClient."""
+        cfg    = config or load_config()
+        hless  = headless if headless is not None else cfg.headless
         browser = BrowserManager(headless=hless)
         await browser.start()
-        return cls(browser, cfg)
+
+        pid = project_id or get_active_project()[0] or ""
+        client = cls(browser, cfg, pid)
+        await client._api._ensure_project_page()
+        return client
 
     async def close(self):
         await self._browser.stop()
@@ -94,476 +125,303 @@ class FlowClient:
     async def __aexit__(self, *_):
         await self.close()
 
-    # ------------------------------------------------------------------
-    # Authentication
-    # ------------------------------------------------------------------
+    # ── Auth ──────────────────────────────────────────────────────────────────
 
     async def login(self) -> None:
-        """Open a visible browser window for interactive Google login.
-
-        After the user completes sign-in the session is persisted to
-        ``~/.flow-py/browser-profile/`` and future calls can run headless.
-        """
+        """Interactive Google login in a visible browser window."""
         log.info("Opening browser for interactive login …")
-        # Temporarily go non-headless
         await self._browser.stop()
         self._browser.headless = False
         await self._browser.start()
 
         page = await self._browser.navigate_to_flow()
         print("🌐 Browser opened. Please sign in to Google and navigate to Flow.")
-        print("   When the Flow project page is visible, press ENTER here to continue.")
+        print("   When the Flow project page is visible, press ENTER to continue.")
         try:
             await asyncio.get_running_loop().run_in_executor(None, input)
         except EOFError:
             pass
 
-        # Auto-detect project URL: poll page.url for up to 30s
-        project_id = None
         current_url = page.url
-        if "/project/" not in current_url:
-            deadline = time.monotonic() + 30
-            while time.monotonic() < deadline:
-                current_url = page.url
-                if "/project/" in current_url:
-                    break
-                await asyncio.sleep(1)
-
         m = re.search(r"/project/([^/?#]+)", current_url)
         if m:
             project_id = m.group(1)
+            self._project_id = project_id
+            self._api.project_id = project_id
             set_active_project(project_id, current_url)
             add_project(project_id, "Default", current_url)
             print(f"✅ Logged in. Active project: {project_id}")
         else:
-            print("✅ Logged in (no project URL detected; run `flow projects use <id>` later).")
+            print("✅ Logged in (no project URL detected; use `flow projects use <id>` later).")
 
-        # Restart headless
         await self._browser.stop()
         self._browser.headless = self._config.headless
         await self._browser.start()
 
-    # ------------------------------------------------------------------
-    # Project management
-    # ------------------------------------------------------------------
+    # ── Project management ────────────────────────────────────────────────────
 
-    async def _ensure_project_page(self) -> str:
-        """Return the project URL, navigating there if needed."""
-        project_id, project_url = get_active_project()
-        if not project_url:
+    @property
+    def project_id(self) -> str:
+        return self._project_id
+
+    @project_id.setter
+    def project_id(self, pid: str):
+        self._project_id       = pid
+        self._api.project_id   = pid
+        self._api._project_page_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+
+    async def _ensure_project(self):
+        if not self._project_id:
             raise NoProjectError()
-        page = await self._browser.ensure_authenticated()
-        if project_url.rstrip("/") not in page.url.rstrip("/"):
-            await self._browser.navigate_to_flow(project_url)
-        return project_url
-
-    async def list_projects(self) -> list[dict]:
-        """Return list of known projects from local registry."""
-        return [
-            {"id": pid, **info}
-            for pid, info in load_projects().items()
-        ]
-
-    async def create_project(self, name: str = "flow-py") -> str:
-        """Create a new Flow project via the UI and return its ID."""
-        page = await self._browser.ensure_authenticated()
-        await self._browser.navigate_to_flow()
-        await asyncio.sleep(2)
-
-        # Click "New project" link/button
-        new_btn = page.get_by_text("New project").first
-        if await new_btn.count() > 0:
-            await new_btn.click()
-        else:
-            # Fallback: try other button texts
-            for btn_text in ("New Project", "Create project", "+", "New"):
-                btn = page.get_by_role("button", name=btn_text)
-                if await btn.count() > 0:
-                    await btn.first.click()
-                    break
-
-        # Wait for URL to contain /project/
-        deadline = time.monotonic() + 15
-        current = page.url
-        while time.monotonic() < deadline:
-            current = page.url
-            if "/project/" in current:
-                break
-            await asyncio.sleep(1)
-
-        m = re.search(r"/project/([^/?#]+)", current)
-        if not m:
-            raise UIError("Could not detect new project URL after creation")
-
-        project_id = m.group(1)
-        set_active_project(project_id, current)
-        add_project(project_id, name, current)
-        log.info("Created project %s", project_id)
-        return project_id
+        await self._api._ensure_project_page()
 
     async def use_project(self, project_id_or_url: str) -> None:
-        """Switch the active project by ID or full URL."""
+        """Switch active project."""
         if project_id_or_url.startswith("http"):
             url = project_id_or_url
-            m = re.search(r"/project/([^/?#]+)", url)
-            project_id = m.group(1) if m else project_id_or_url
+            m   = re.search(r"/project/([^/?#]+)", url)
+            pid = m.group(1) if m else project_id_or_url
         else:
-            project_id = project_id_or_url
-            url = f"{FLOW_BASE_URL}/project/{project_id}"
+            pid = project_id_or_url
+            url = f"{FLOW_BASE_URL}/project/{pid}"
 
-        set_active_project(project_id, url)
-        add_project(project_id, "imported", url)
-        log.info("Active project set to %s", project_id)
+        self.project_id = pid
+        set_active_project(pid, url)
+        add_project(pid, "imported", url)
 
-    # ------------------------------------------------------------------
-    # Download helpers
-    # ------------------------------------------------------------------
+    async def list_projects(self) -> list[dict]:
+        return [{"id": pid, **info} for pid, info in load_projects().items()]
 
-    async def _download_media_url(self, url: str, output_path: Path) -> Path:
-        """Download a Flow media URL using the Playwright request context (carries session cookies).
+    # ── Credits ───────────────────────────────────────────────────────────────
 
-        Flow images are served via /api/trpc/media.getMediaUrlRedirect which requires
-        Google auth cookies. aiohttp cannot access these — must use context.request.
-        """
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        response = await self._browser.context.request.get(url)
-        if response.status != 200:
-            raise Exception(f"Download failed: HTTP {response.status} for {url}")
-        body = await response.body()
-        output_path.write_bytes(body)
-        log.debug("Saved media to %s (%d KB)", output_path, len(body) // 1024)
-        return output_path
+    async def get_credits(self) -> Credits:
+        await self._ensure_project()
+        return await self._api.get_credits()
 
-    # ------------------------------------------------------------------
-    # Core generation: single prompt
-    # ------------------------------------------------------------------
+    # ── Workflows ─────────────────────────────────────────────────────────────
 
-    async def _generate_single(
-        self,
-        prompt: str,
-        mode: GenerationMode,
-        output_path: Path,
-        aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-        count: int = 1,
-        video_duration: str = "8s",
-        frame_image_path: Optional[str] = None,
-    ) -> GenerationResult:
-        """Generate one prompt and download the result(s)."""
-        t0 = time.monotonic()
-        result = GenerationResult(prompt=prompt, mode=mode, status=GenerationStatus.GENERATING)
+    async def list_workflows(self) -> list[Workflow]:
+        await self._ensure_project()
+        return await self._api.list_workflows()
 
-        page = await self._browser.page()
-
-        try:
-            # For frame-to-video: upload image first, then switch to Video mode
-            if mode == GenerationMode.FRAME_TO_VIDEO and frame_image_path:
-                await self._flow_ui.upload_image(page, frame_image_path)
-                await asyncio.sleep(1)
-
-            # Open settings and configure (mode + aspect ratio + count)
-            await self._flow_ui.open_settings_panel(page)
-            await self._flow_ui.switch_mode(page, mode)
-            await self._flow_ui.set_aspect_ratio(page, aspect_ratio)
-            if count > 1:
-                await self._flow_ui.set_count(page, count)
-
-            # Snapshot completed-image count BEFORE generation
-            before_count = await self._flow_ui.count_gallery_items(page)
-
-            # Fill prompt (keyboard.type → triggers React state) and submit
-            await self._flow_ui.fill_prompt(page, prompt)
-            await asyncio.sleep(0.3)
-            await self._flow_ui.click_submit(page)
-            log.info("Submitted: %s [%s]", prompt[:60], mode.value)
-
-            # Wait for generation to complete (two-phase: item appears → src available)
-            done = await self._flow_ui.wait_for_generation_complete(
-                page,
-                before_count=before_count,
-                timeout_s=self._config.generation_timeout_s,
-            )
-            if not done:
-                if await self._flow_ui.check_policy_error(page):
-                    raise PolicyError(prompt)
-                raise GenerationTimeout(self._config.generation_timeout_s)
-
-            result.status = GenerationStatus.COMPLETE
-            result.elapsed_s = time.monotonic() - t0
-
-            # Download via Playwright context (carries session cookies)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            src = await self._flow_ui.get_newest_media_src(page)
-            if src:
-                result.media_urls = [src]
-                ext = _ext_for_url(src, mode)
-                dl_path = output_path.with_suffix(ext)
-                try:
-                    await self._download_media_url(src, dl_path)
-                    result.file_paths.append(dl_path)
-                    log.info("Downloaded to %s", dl_path)
-                except Exception as e:
-                    log.warning("Download failed: %s", e)
-            else:
-                log.warning("No media src found after generation")
-
-        except PolicyError:
-            result.status = GenerationStatus.POLICY_REJECTED
-            result.error = "Content policy rejection"
-        except GenerationTimeout as e:
-            result.status = GenerationStatus.FAILED
-            result.error = str(e)
-        except Exception as e:
-            result.status = GenerationStatus.FAILED
-            result.error = str(e)
-            log.error("Generation error: %s", e, exc_info=True)
-            result.elapsed_s = result.elapsed_s or (time.monotonic() - t0)
-
-        return result
-
-    # ------------------------------------------------------------------
-    # Public generation APIs
-    # ------------------------------------------------------------------
+    # ── Image generation ──────────────────────────────────────────────────────
 
     async def generate_image(
         self,
         prompt: str,
         output_dir: str | Path = ".",
-        filename: Optional[str] = None,
-        aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-        count: int = 1,
-    ) -> GenerationResult:
-        """Generate an image from a text prompt.
+        *,
+        aspect_ratio: AspectRatio    = AspectRatio.PORTRAIT,
+        model:        str            = IMAGE_MODEL_NARWHAL,
+        count:        int            = 4,
+        seed:         Optional[int]  = None,
+        download:     bool           = True,
+    ) -> list[GeneratedImage]:
+        """
+        Generate images from a text prompt.
 
         Args:
-            prompt: Text description of the image to generate.
-            output_dir: Directory to save downloaded images.
-            filename: Override filename (without extension).
-            aspect_ratio: Landscape, portrait, or square.
-            count: Number of images to generate (Flow generates multiple).
+            prompt:       Text description.
+            output_dir:   Where to save images (if download=True).
+            aspect_ratio: PORTRAIT (9:16), LANDSCAPE (16:9), or SQUARE.
+            model:        Image model (default: NARWHAL = Nano Banana 2).
+            count:        Number of images to generate (1–4).
+            seed:         Reproducibility seed.
+            download:     Auto-download images to output_dir.
 
         Returns:
-            GenerationResult with file_paths populated on success.
+            List of GeneratedImage objects.
         """
-        await self._ensure_project_page()
-        output_dir = Path(output_dir)
-        fname = filename or _safe_filename(prompt)
-        output_path = output_dir / fname
-
-        return await self._generate_single(
-            prompt=prompt,
-            mode=GenerationMode.IMAGE,
-            output_path=output_path,
-            aspect_ratio=aspect_ratio,
-            count=count,
+        await self._ensure_project()
+        img_ar, _ = _AR_MAP.get(aspect_ratio, (IMAGE_AR_PORTRAIT, VIDEO_AR_LANDSCAPE))
+        images = await self._api.generate_image(
+            prompt, model=model, aspect_ratio=img_ar, count=count, seed=seed,
         )
+        if download and images:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for img in images:
+                if img.fife_url:
+                    await self._api.download_image(img, output_dir)
+        return images
+
+    # ── Video generation ──────────────────────────────────────────────────────
 
     async def generate_video(
         self,
         prompt: str,
-        output_dir: str | Path = ".",
-        filename: Optional[str] = None,
-        aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-        duration: str = "8s",
-    ) -> GenerationResult:
-        """Generate a video from a text prompt (Veo).
-
-        Args:
-            prompt: Text description of the video.
-            output_dir: Directory to save downloaded video.
-            filename: Override filename (without extension).
-            aspect_ratio: Landscape or portrait.
-            duration: "5s" or "8s".
-
-        Returns:
-            GenerationResult with file_paths populated on success.
-        """
-        await self._ensure_project_page()
-        output_dir = Path(output_dir)
-        fname = filename or _safe_filename(prompt)
-        output_path = output_dir / fname
-
-        return await self._generate_single(
-            prompt=prompt,
-            mode=GenerationMode.VIDEO,
-            output_path=output_path,
-            aspect_ratio=aspect_ratio,
-            video_duration=duration,
+        *,
+        model:        str           = VIDEO_MODEL_VEO31_FAST,
+        aspect_ratio: AspectRatio   = AspectRatio.LANDSCAPE,
+        seed:         Optional[int] = None,
+    ) -> VideoJob:
+        """Submit a text-to-video job (returns immediately, PENDING)."""
+        await self._ensure_project()
+        _, vid_ar = _AR_MAP.get(aspect_ratio, (IMAGE_AR_LANDSCAPE, VIDEO_AR_LANDSCAPE))
+        return await self._api.generate_video(
+            prompt, model=model, aspect_ratio=vid_ar, seed=seed,
         )
 
-    async def generate_frame_to_video(
+    async def generate_video_and_wait(
+        self,
+        prompt: str,
+        output_dir: str | Path = ".",
+        *,
+        model:        str           = VIDEO_MODEL_VEO31_FAST,
+        aspect_ratio: AspectRatio   = AspectRatio.LANDSCAPE,
+        seed:         Optional[int] = None,
+        timeout_s:    int           = 0,
+        download:     bool          = True,
+        on_poll=None,
+    ) -> tuple[VideoJob, VideoStatus]:
+        """
+        Generate a video and wait for it to finish.
+
+        Args:
+            prompt:       Text prompt.
+            output_dir:   Download directory.
+            model:        Veo model key.
+            aspect_ratio: Video aspect ratio.
+            seed:         Reproducibility seed.
+            timeout_s:    Max wait seconds (0 = default 300s).
+            download:     Auto-download when complete.
+            on_poll:      Progress callback(status, elapsed).
+
+        Returns:
+            (VideoJob, VideoStatus) — job.file_path set if download=True.
+        """
+        await self._ensure_project()
+        _, vid_ar = _AR_MAP.get(aspect_ratio, (IMAGE_AR_LANDSCAPE, VIDEO_AR_LANDSCAPE))
+        job, status = await self._api.generate_video_and_wait(
+            prompt, model=model, aspect_ratio=vid_ar, seed=seed,
+            timeout_s=timeout_s, on_poll=on_poll,
+        )
+        if download and status.fife_url:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            job.fife_url = status.fife_url
+            await self._api.download_video(job, output_dir)
+        return job, status
+
+    async def image_to_video(
         self,
         image_path: str | Path,
         prompt: str,
         output_dir: str | Path = ".",
-        filename: Optional[str] = None,
-        duration: str = "8s",
-    ) -> GenerationResult:
-        """Animate a static image with a motion prompt (Frame-to-Video / Veo).
+        *,
+        model:       str           = VIDEO_MODEL_VEO31_I2V,
+        aspect_ratio: AspectRatio  = AspectRatio.PORTRAIT,
+        seed:         Optional[int] = None,
+        timeout_s:    int           = 0,
+        download:     bool          = True,
+        on_poll=None,
+    ) -> tuple[VideoJob, VideoStatus]:
+        """
+        Animate a local image (Frames mode).
+
+        Uploads the image, generates a video from it, and downloads the result.
+        """
+        await self._ensure_project()
+        _, vid_ar = _AR_MAP.get(aspect_ratio, (IMAGE_AR_PORTRAIT, VIDEO_AR_PORTRAIT))
+
+        media_name = await self._api.upload_image(image_path)
+        job = await self._api.generate_video_from_image(
+            prompt, media_name, model=model, aspect_ratio=vid_ar, seed=seed,
+        )
+        status = await self._api.wait_for_video(job, timeout_s=timeout_s, on_poll=on_poll)
+
+        if download and status.fife_url:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            job.fife_url = status.fife_url
+            await self._api.download_video(job, output_dir)
+
+        return job, status
+
+    async def extend_video(
+        self,
+        media_name_or_job: str | VideoJob,
+        prompt: str = "",
+        output_dir: str | Path = ".",
+        *,
+        n: int   = 1,
+        aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
+        timeout_s: int  = 0,
+        download:  bool = True,
+    ) -> list[tuple[VideoJob, VideoStatus]]:
+        """
+        Extend a video N times (chain extensions for longer videos).
 
         Args:
-            image_path: Path to the source image (PNG/JPEG).
-            prompt: Motion/camera description (e.g., "slow zoom with golden particles").
-            output_dir: Directory to save downloaded video.
-            filename: Override filename.
-            duration: "5s" or "8s".
+            media_name_or_job: Media name (UUID) or VideoJob of the video to extend.
+            prompt:            Continuation prompt (empty = auto-continue).
+            output_dir:        Download directory for each segment.
+            n:                 Number of extensions (default 1).
+            aspect_ratio:      Should match the original video.
+            timeout_s:         Per-extension timeout.
+            download:          Auto-download each segment.
 
         Returns:
-            GenerationResult with file_paths populated on success.
+            List of (VideoJob, VideoStatus) for each extension.
         """
-        await self._ensure_project_page()
-        image_path = str(Path(image_path).resolve())
-        output_dir = Path(output_dir)
-        fname = filename or _safe_filename(prompt)
-        output_path = output_dir / fname
+        await self._ensure_project()
+        if isinstance(media_name_or_job, VideoJob):
+            media_name = media_name_or_job.media_name
+        else:
+            media_name = media_name_or_job
 
-        return await self._generate_single(
-            prompt=prompt,
-            mode=GenerationMode.FRAME_TO_VIDEO,
-            output_path=output_path,
-            frame_image_path=image_path,
-            video_duration=duration,
+        _, vid_ar = _AR_MAP.get(aspect_ratio, (IMAGE_AR_LANDSCAPE, VIDEO_AR_LANDSCAPE))
+
+        results = await self._api.extend_video_loop(
+            media_name, n, prompt=prompt,
+            output_dir=output_dir, aspect_ratio=vid_ar, timeout_s=timeout_s,
         )
 
-    # ------------------------------------------------------------------
-    # Batch generation
-    # ------------------------------------------------------------------
+        if download:
+            for job, status in results:
+                if status.fife_url and not job.file_path:
+                    job.fife_url = status.fife_url
+                    output_dir = Path(output_dir)
+                    await self._api.download_video(job, output_dir)
 
-    async def batch_generate(
+        return results
+
+    # ── Batch operations ──────────────────────────────────────────────────────
+
+    async def batch_images(
         self,
-        prompts: str | Path | list[str] | list[ParsedPrompt],
-        mode: GenerationMode = GenerationMode.IMAGE,
+        prompts: list[str],
         output_dir: str | Path = ".",
-        aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-        delay_s: Optional[float] = None,
-        on_result=None,
-    ) -> BatchResult:
-        """Process a batch of prompts sequentially.
+        *,
+        aspect_ratio: AspectRatio = AspectRatio.PORTRAIT,
+        count:        int         = 1,
+        delay_s:      float       = 1.0,
+    ) -> list[list[GeneratedImage]]:
+        """Generate images for multiple prompts."""
+        await self._ensure_project()
+        img_ar, _ = _AR_MAP.get(aspect_ratio, (IMAGE_AR_PORTRAIT, VIDEO_AR_LANDSCAPE))
+        return await self._api.batch_generate_images(
+            prompts, output_dir, aspect_ratio=img_ar, count=count, delay_s=delay_s,
+        )
 
-        Args:
-            prompts: Path to prompts file, list of prompt strings, or
-                     list of ParsedPrompt objects.
-            mode: IMAGE, VIDEO, or FRAME_TO_VIDEO.
-            output_dir: Output directory for all generated files.
-            aspect_ratio: Aspect ratio for all generations.
-            delay_s: Pause between prompts (default from config).
-            on_result: Optional callback(result, index, total) for progress.
-
-        Returns:
-            BatchResult summarising the run.
-        """
-        await self._ensure_project_page()
-
-        # Normalise input
-        parsed: list[ParsedPrompt]
-        if isinstance(prompts, (str, Path)):
-            parsed = parse_prompt_file(prompts)
-        elif prompts and isinstance(prompts[0], str):
-            from ._models import ParsedPrompt as _PP
-            parsed = [_PP(text=p) for p in prompts]
-        else:
-            parsed = prompts  # type: ignore
-
-        delay = delay_s if delay_s is not None else self._config.inter_prompt_delay_s
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        batch = BatchResult(mode=mode, total=len(parsed))
-
-        for idx, pp in enumerate(parsed):
-            log.info("[%d/%d] %s", idx + 1, len(parsed), pp.text[:70])
-
-            # Determine mode per-prompt (pipeline mode overrides)
-            effective_mode = mode
-            if pp.video_prompt:
-                # Phase 1: generate image, Phase 2: animate it
-                img_result = await self._generate_single(
-                    prompt=pp.text,
-                    mode=GenerationMode.IMAGE,
-                    output_path=output_dir / f"frame_{idx:04d}",
-                    aspect_ratio=aspect_ratio,
-                )
-                batch.add(img_result)
-                if on_result:
-                    on_result(img_result, idx * 2, len(parsed) * 2)
-
-                if img_result.succeeded and img_result.primary_file:
-                    vid_result = await self._generate_single(
-                        prompt=pp.video_prompt,
-                        mode=GenerationMode.FRAME_TO_VIDEO,
-                        output_path=output_dir / f"video_{idx:04d}",
-                        frame_image_path=str(img_result.primary_file),
-                    )
-                    batch.add(vid_result)
-                    if on_result:
-                        on_result(vid_result, idx * 2 + 1, len(parsed) * 2)
-                else:
-                    # Skip video if image failed
-                    skip = GenerationResult(
-                        prompt=pp.video_prompt,
-                        mode=GenerationMode.FRAME_TO_VIDEO,
-                        status=GenerationStatus.SKIPPED,
-                        error="Source image failed",
-                    )
-                    batch.add(skip)
-            else:
-                tag = pp.tag or f"{idx:04d}"
-                result = await self._generate_single(
-                    prompt=pp.text,
-                    mode=effective_mode,
-                    output_path=output_dir / tag,
-                    aspect_ratio=aspect_ratio,
-                )
-                batch.add(result)
-                if on_result:
-                    on_result(result, idx, len(parsed))
-
-            if idx < len(parsed) - 1:
-                await asyncio.sleep(delay)
-
-        batch.finished_at = time.time()
-        return batch
-
-    # ------------------------------------------------------------------
-    # Streaming batch (async generator for progress UX)
-    # ------------------------------------------------------------------
-
-    async def stream_batch(
+    async def batch_videos(
         self,
-        prompts: str | Path | list[str] | list[ParsedPrompt],
-        mode: GenerationMode = GenerationMode.IMAGE,
+        prompts: list[str],
         output_dir: str | Path = ".",
+        *,
         aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE,
-        delay_s: Optional[float] = None,
-    ) -> AsyncIterator[GenerationResult]:
-        """Like batch_generate but yields each result as it completes."""
-        await self._ensure_project_page()
+        concurrency:  int         = 3,
+        timeout_s:    int         = 0,
+    ) -> list[tuple[VideoJob, VideoStatus]]:
+        """Generate videos for multiple prompts concurrently."""
+        await self._ensure_project()
+        _, vid_ar = _AR_MAP.get(aspect_ratio, (IMAGE_AR_LANDSCAPE, VIDEO_AR_LANDSCAPE))
+        return await self._api.batch_generate_videos(
+            prompts, output_dir, aspect_ratio=vid_ar,
+            concurrency=concurrency, timeout_s=timeout_s,
+        )
 
-        if isinstance(prompts, (str, Path)):
-            parsed = parse_prompt_file(prompts)
-        elif prompts and isinstance(prompts[0], str):
-            from ._models import ParsedPrompt as _PP
-            parsed = [_PP(text=p) for p in prompts]
-        else:
-            parsed = prompts  # type: ignore
-
-        delay = delay_s if delay_s is not None else self._config.inter_prompt_delay_s
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        for idx, pp in enumerate(parsed):
-            result = await self._generate_single(
-                prompt=pp.text,
-                mode=mode,
-                output_path=output_dir / (pp.tag or f"{idx:04d}"),
-                aspect_ratio=aspect_ratio,
-            )
-            yield result
-            if idx < len(parsed) - 1:
-                await asyncio.sleep(delay)
-
-    # ------------------------------------------------------------------
-    # Config management
-    # ------------------------------------------------------------------
+    # ── Config ────────────────────────────────────────────────────────────────
 
     def get_config(self) -> FlowConfig:
         return self._config
@@ -575,24 +433,9 @@ class FlowClient:
         save_config(self._config)
         return self._config
 
+    # ── Direct API access ─────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-#  Utilities
-# ─────────────────────────────────────────────
-
-def _safe_filename(text: str, max_len: int = 50) -> str:
-    """Convert a prompt to a safe filename stem."""
-    slug = re.sub(r"[^\w\s-]", "", text.lower())
-    slug = re.sub(r"[\s_-]+", "_", slug).strip("_")
-    return slug[:max_len] or "output"
-
-
-def _ext_for_url(url: str, mode: GenerationMode) -> str:
-    """Guess file extension from URL or generation mode."""
-    path = urlparse(url).path.lower()
-    for ext in (".mp4", ".webm", ".gif", ".png", ".jpg", ".jpeg"):
-        if path.endswith(ext):
-            return ext
-    if mode in (GenerationMode.VIDEO, GenerationMode.FRAME_TO_VIDEO):
-        return ".mp4"
-    return ".png"
+    @property
+    def api(self) -> FlowAPI:
+        """Direct access to the low-level FlowAPI client."""
+        return self._api
