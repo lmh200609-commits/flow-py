@@ -77,6 +77,13 @@ class FlowUI:
 
         Returns True if panel is open (or was already open).
         """
+        # Wait for React to hydrate — buttons may not exist on domcontentloaded
+        try:
+            await page.wait_for_selector('button', timeout=8000)
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
         already_open = await self._settings_visible(page)
         if already_open:
             return True

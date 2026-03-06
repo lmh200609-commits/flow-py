@@ -56,9 +56,13 @@ class PolicyError(FlowError):
 class GenerationTimeout(FlowError):
     """Generation did not complete within the timeout window."""
 
-    def __init__(self, timeout_s: int):
-        self.timeout_s = timeout_s
-        super().__init__(f"Generation timed out after {timeout_s}s")
+    def __init__(self, message: str | int = 0):
+        if isinstance(message, (int, float)) and message > 0:
+            self.timeout_s = int(message)
+            super().__init__(f"Generation timed out after {message}s")
+        else:
+            self.timeout_s = 0
+            super().__init__(str(message) if message else "Generation timed out")
 
 
 class DownloadError(FlowError):

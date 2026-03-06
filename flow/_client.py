@@ -231,16 +231,19 @@ class FlowClient:
         aspect: str = "landscape",
         count: int = 1,
         reference_images: Optional[list[str]] = None,
-        timeout_s: int = 60,
+        timeout_s: int = 120,
     ) -> list[GeneratedImage]:
         """
         Generate images from a text prompt (T2I).
 
         Returns list of GeneratedImage with fife_url for display/download.
-        Image generation is synchronous (no polling needed).
+        Image generation is synchronous (waits 45-60s for server to generate).
 
         Uses the same UI as video generation but with Image mode selected.
         Endpoint: batchGenerateImages (returns immediately with image data).
+        
+        Note: Settings panel can be unreliable. If switch_mode fails, manually
+        click an image thumbnail first to enter image edit mode, then call this.
         """
         page = await self._bm.page()
         await self._ensure_project_page(page)
@@ -263,11 +266,14 @@ class FlowClient:
         )
 
         images = []
-        for img_data in entry.resp.get("generatedImages", []):
+        for item in entry.resp.get("media", []):
+            gen = item.get("image", {}).get("generatedImage", {})
             img = GeneratedImage.__new__(GeneratedImage)
-            img.fife_url   = img_data.get("fifeUrl") or img_data.get("fife_url", "")
-            img.media_name = img_data.get("mediaName") or img_data.get("name", "")
-            img.prompt     = prompt
+            img.fife_url   = gen.get("fifeUrl", "")
+            img.media_name = item.get("name", "")
+            img.prompt     = gen.get("prompt", prompt)
+            img.seed       = gen.get("seed")
+            img.dimensions = item.get("dimensions", {})
             images.append(img)
 
         log.info("T2I complete: %d image(s)", len(images))
@@ -301,8 +307,7 @@ class FlowClient:
         interceptor.attach(page)
 
         await self._ui.click_extend(page)
-        if prompt:
-            await self._ui.fill_extend_prompt(page, prompt)
+        await self._ui.fill_extend_prompt(page, prompt or "Continue the scene")
         await self._ui.click_create_in_panel(page)
 
         entry = await interceptor.wait_for(
@@ -404,7 +409,7 @@ class FlowClient:
 
         await self._ui.click_camera(page)
         await self._ui.select_camera_motion(page, motion_label)
-        await self._ui.click_create_in_panel(page)
+        await self._ui.click_camera_create(page)
 
         entry = await interceptor.wait_for(
             "batchAsyncGenerateVideoReshootVideo", timeout=timeout_s, require_success=True
@@ -444,7 +449,7 @@ class FlowClient:
 
         await self._ui.click_camera(page)
         await self._ui.select_camera_position(page, pos_label)
-        await self._ui.click_create_in_panel(page)
+        await self._ui.click_camera_create(page)
 
         entry = await interceptor.wait_for(
             "batchAsyncGenerateVideoReshootVideo", timeout=timeout_s, require_success=True
@@ -570,6 +575,8 @@ class FlowClient:
         interceptor = UIInterceptor()
         interceptor.attach(page)
 
+        await self._ui.click_download_button(page)
+        await asyncio.sleep(0.5)
         if resolution.lower() in ("4k", "4096"):
             await self._ui.click_upscale_4k(page)
         else:

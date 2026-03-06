@@ -128,13 +128,17 @@ class UIInterceptor:
                     log.debug("← captured resp %s [%d]", t, resp.status)
                     break
 
-        # Schedule async read without blocking the listener
+        # Schedule async read without blocking the listener.
+        # Python 3.10+: use get_running_loop().create_task() which is
+        # safe from sync callbacks inside a running event loop.
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            asyncio.get_running_loop().create_task(_read())
+        except RuntimeError:
+            # Fallback: no running loop in this context
+            try:
                 asyncio.ensure_future(_read())
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     # ── Wait helpers ──────────────────────────────────────────────────────────
 
