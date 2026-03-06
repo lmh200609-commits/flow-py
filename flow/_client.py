@@ -220,15 +220,18 @@ class FlowClient:
     # ------------------------------------------------------------------
 
     async def _download_media_url(self, url: str, output_path: Path) -> Path:
-        """Download a media file directly via aiohttp."""
+        """Download a Flow media URL using the Playwright request context (carries session cookies).
+
+        Flow images are served via /api/trpc/media.getMediaUrlRedirect which requires
+        Google auth cookies. aiohttp cannot access these — must use context.request.
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-                resp.raise_for_status()
-                async with aiofiles.open(output_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(65536):
-                        await f.write(chunk)
-        log.debug("Saved media to %s", output_path)
+        response = await self._browser.context.request.get(url)
+        if response.status != 200:
+            raise Exception(f"Download failed: HTTP {response.status} for {url}")
+        body = await response.body()
+        output_path.write_bytes(body)
+        log.debug("Saved media to %s (%d KB)", output_path, len(body) // 1024)
         return output_path
 
     # ------------------------------------------------------------------
@@ -251,61 +254,47 @@ class FlowClient:
 
         page = await self._browser.page()
 
-        # Intercept GCS media URLs
-        intercepted: list[str] = []
-
-        def on_response(resp):
-            if "storage.googleapis.com" in resp.url and resp.status == 200:
-                if resp.url not in intercepted:
-                    intercepted.append(resp.url)
-
-        page.on("response", on_response)
-
         try:
             # For frame-to-video: upload image first, then switch to Video mode
             if mode == GenerationMode.FRAME_TO_VIDEO and frame_image_path:
                 await self._flow_ui.upload_image(page, frame_image_path)
                 await asyncio.sleep(1)
 
-            # Open settings and configure
+            # Open settings and configure (mode + aspect ratio + count)
             await self._flow_ui.open_settings_panel(page)
             await self._flow_ui.switch_mode(page, mode)
             await self._flow_ui.set_aspect_ratio(page, aspect_ratio)
             if count > 1:
                 await self._flow_ui.set_count(page, count)
 
-            # Snapshot gallery count before
+            # Snapshot completed-image count BEFORE generation
             before_count = await self._flow_ui.count_gallery_items(page)
 
-            # Fill and submit
+            # Fill prompt (keyboard.type → triggers React state) and submit
             await self._flow_ui.fill_prompt(page, prompt)
             await asyncio.sleep(0.3)
             await self._flow_ui.click_submit(page)
+            log.info("Submitted: %s [%s]", prompt[:60], mode.value)
 
-            log.info("Submitted prompt: %s [%s]", prompt[:60], mode.value)
-
-            # Wait for new gallery item
-            timeout = self._config.generation_timeout_s
-            deadline = time.monotonic() + timeout
-            new_count = before_count
-            while time.monotonic() < deadline:
+            # Wait for generation to complete (two-phase: item appears → src available)
+            done = await self._flow_ui.wait_for_generation_complete(
+                page,
+                before_count=before_count,
+                timeout_s=self._config.generation_timeout_s,
+            )
+            if not done:
                 if await self._flow_ui.check_policy_error(page):
                     raise PolicyError(prompt)
-                new_count = await self._flow_ui.count_gallery_items(page)
-                if new_count > before_count:
-                    break
-                await asyncio.sleep(2)
-            else:
-                raise GenerationTimeout(timeout)
+                raise GenerationTimeout(self._config.generation_timeout_s)
 
             result.status = GenerationStatus.COMPLETE
             result.elapsed_s = time.monotonic() - t0
-            result.media_urls = list(intercepted)
 
-            # Download
+            # Download via Playwright context (carries session cookies)
             output_path.parent.mkdir(parents=True, exist_ok=True)
             src = await self._flow_ui.get_newest_media_src(page)
             if src:
+                result.media_urls = [src]
                 ext = _ext_for_url(src, mode)
                 dl_path = output_path.with_suffix(ext)
                 try:
@@ -313,9 +302,9 @@ class FlowClient:
                     result.file_paths.append(dl_path)
                     log.info("Downloaded to %s", dl_path)
                 except Exception as e:
-                    log.warning("Direct download failed: %s", e)
-                    # Fallback: click download button
-                    await self._flow_ui.click_download_on_newest(page)
+                    log.warning("Download failed: %s", e)
+            else:
+                log.warning("No media src found after generation")
 
         except PolicyError:
             result.status = GenerationStatus.POLICY_REJECTED
@@ -327,8 +316,6 @@ class FlowClient:
             result.status = GenerationStatus.FAILED
             result.error = str(e)
             log.error("Generation error: %s", e, exc_info=True)
-        finally:
-            page.remove_listener("response", on_response)
             result.elapsed_s = result.elapsed_s or (time.monotonic() - t0)
 
         return result

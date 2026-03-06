@@ -112,28 +112,32 @@ class FlowUI:
     async def switch_mode(self, page, mode: GenerationMode) -> bool:
         """Select Image or Video mode via the settings panel.
 
+        Mode options are TABS (role=tab) inside the settings panel.
         Returns True if successfully switched.
         """
         await self.open_settings_panel(page)
 
-        target_texts = _MODE_BUTTON_TEXT[mode]
-        for text in target_texts:
-            # Try exact role button
-            btn = page.get_by_role("button", name=text, exact=True).first
-            if await btn.count() > 0:
-                await btn.click()
+        # Tab labels as seen in DOM: "image Image", "videocam Video", "crop_free Frames"
+        label_map = {
+            GenerationMode.IMAGE:          ["Image", "image Image"],
+            GenerationMode.VIDEO:          ["Video", "videocam Video"],
+            GenerationMode.FRAME_TO_VIDEO: ["Frames", "crop_free Frames", "Video"],
+        }
+        for label in label_map.get(mode, []):
+            tab = page.get_by_role("tab", name=label, exact=True).first
+            if await tab.count() > 0:
+                await tab.click()
                 await asyncio.sleep(0.4)
-                log.debug("Switched mode to %s via button '%s'", mode.value, text)
+                log.debug("Switched mode to %s via tab '%s'", mode.value, label)
                 return True
-            # Try contains text
-            btn = page.locator("button").filter(has_text=text).first
-            if await btn.count() > 0:
-                await btn.click()
+            # Partial match
+            tab = page.locator("[role='tab']").filter(has_text=label.split()[-1]).first
+            if await tab.count() > 0:
+                await tab.click()
                 await asyncio.sleep(0.4)
-                log.debug("Switched mode to %s via contains '%s'", mode.value, text)
                 return True
 
-        log.warning("Could not find mode button for %s", mode.value)
+        log.warning("Could not find mode tab for %s", mode.value)
         return False
 
     # ------------------------------------------------------------------
@@ -141,24 +145,41 @@ class FlowUI:
     # ------------------------------------------------------------------
 
     async def set_aspect_ratio(self, page, ratio: AspectRatio) -> bool:
-        """Select aspect ratio via the settings panel."""
+        """Select aspect ratio via the settings panel.
+
+        Aspect ratio options are TABS (role=tab), not buttons.
+        Must open the settings panel first.
+        """
         await self.open_settings_panel(page)
 
-        target_texts = _ASPECT_BUTTON_TEXT[ratio]
-        for text in target_texts:
-            btn = page.get_by_role("button", name=text, exact=True).first
-            if await btn.count() > 0:
-                await btn.click()
+        label_map = {
+            AspectRatio.LANDSCAPE: ["Landscape", "crop_16_9 Landscape"],
+            AspectRatio.PORTRAIT:  ["Portrait",  "crop_9_16 Portrait"],
+            AspectRatio.SQUARE:    ["Square",    "crop_1_1 Square"],
+        }
+        for label in label_map.get(ratio, []):
+            # Try tab role first (Flow uses tabs for aspect ratio)
+            tab = page.get_by_role("tab", name=label, exact=True).first
+            if await tab.count() > 0:
+                await tab.click()
                 await asyncio.sleep(0.3)
-                log.debug("Set aspect ratio to %s", ratio.value)
+                log.debug("Set aspect ratio to %s via tab '%s'", ratio.value, label)
                 return True
-            btn = page.locator("button").filter(has_text=text.split()[-1]).first
-            if await btn.count() > 0:
-                await btn.click()
+            # Try contains-text tab
+            tab = page.locator("[role='tab']").filter(has_text=label.split()[-1]).first
+            if await tab.count() > 0:
+                await tab.click()
                 await asyncio.sleep(0.3)
                 return True
 
-        log.warning("Could not find aspect ratio button for %s", ratio.value)
+        # Already set? Check the pill text
+        pill_text = await page.locator("button").filter(has_text="Nano Banana").first.text_content()
+        ratio_marker = {"9:16": "crop_9_16", "16:9": "crop_16_9", "1:1": "crop_1_1"}.get(ratio.value, "")
+        if ratio_marker and ratio_marker in (pill_text or ""):
+            log.debug("Aspect ratio %s already set (pill shows %s)", ratio.value, ratio_marker)
+            return True
+
+        log.warning("Could not find aspect ratio tab for %s", ratio.value)
         return False
 
     # ------------------------------------------------------------------
@@ -166,17 +187,21 @@ class FlowUI:
     # ------------------------------------------------------------------
 
     async def set_count(self, page, count: int) -> bool:
-        """Set generation count (1-4) via the settings panel."""
+        """Set generation count (1-4) via the settings panel.
+
+        Count options are TABS: tab "x1", tab "x2", tab "x3", tab "x4".
+        """
         await self.open_settings_panel(page)
         count = max(1, min(4, count))
-        text = _COUNT_BUTTON_TEXT[str(count)]
+        label = f"x{count}"
 
-        btn = page.locator("button").filter(has_text=text).first
-        if await btn.count() > 0:
-            await btn.click()
+        tab = page.get_by_role("tab", name=label, exact=True).first
+        if await tab.count() > 0:
+            await tab.click()
             await asyncio.sleep(0.3)
             log.debug("Set count to %d", count)
             return True
+
         log.warning("Could not set count to %d", count)
         return False
 
@@ -185,32 +210,106 @@ class FlowUI:
     # ------------------------------------------------------------------
 
     async def fill_prompt(self, page, prompt: str) -> bool:
-        """Fill the prompt textarea ("What do you want to create?")."""
-        # Click elsewhere first to close any open panel
+        """Fill the prompt input ("What do you want to create?").
+
+        Key findings from DOM inspection:
+        - The prompt input is a contenteditable DIV (NOT a textarea)
+        - The only textarea is a hidden reCAPTCHA element — skip it
+        - Must use page.keyboard.type() to trigger React synthetic events
+        - execCommand('insertText') doesn't update React state
+        - The search bar (input[type=text]) can steal focus — must close it first
+        """
+        # Close settings panel and any search overlay
         try:
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.3)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
         except Exception:
             pass
 
-        selectors = [
-            "textarea[placeholder*='create' i]",
-            "textarea[placeholder*='What' i]",
-            "textarea",
-            "[contenteditable='true']",
-            "div[role='textbox']",
-        ]
-        for sel in selectors:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.click()
-                await el.press("Control+a")
-                await el.press("Meta+a")
-                await el.fill(prompt)
-                log.debug("Filled prompt (%d chars) via '%s'", len(prompt), sel)
-                return True
+        # Find the visible contenteditable div at the bottom (the prompt input)
+        # There is only ONE visible contenteditable div on the project page
+        els = page.locator("div[contenteditable]")
+        count = await els.count()
 
-        log.warning("Could not find prompt textarea")
+        for i in range(count):
+            el = els.nth(i)
+            visible = await el.evaluate(
+                "el => el.offsetWidth > 0 && el.offsetHeight > 0 && el.getBoundingClientRect().y > 100"
+            )
+            if not visible:
+                continue
+
+            # Scroll into view and click to focus
+            await el.scroll_into_view_if_needed()
+            await asyncio.sleep(0.2)
+            await el.click()
+            await asyncio.sleep(0.3)
+
+            # Verify focus landed on this contenteditable (not the search bar)
+            focused_tag = await page.evaluate(
+                "() => document.activeElement.tagName + '|' + document.activeElement.contentEditable"
+            )
+            if "true" not in focused_tag.lower():
+                log.warning("Focus went to %s instead of contenteditable", focused_tag)
+                continue
+
+            # Select all and clear, then type via keyboard (triggers React events)
+            await page.keyboard.press("Meta+a")
+            await page.keyboard.press("Control+a")
+            await asyncio.sleep(0.1)
+            await page.keyboard.type(prompt, delay=15)
+            await asyncio.sleep(0.2)
+
+            # Verify content was inserted
+            content = await el.text_content()
+            if prompt[:10] in (content or ""):
+                log.debug("Filled prompt (%d chars)", len(prompt))
+                return True
+            log.warning("Prompt content not found after typing, content=%r", (content or "")[:40])
+
+        log.warning("Could not fill prompt input")
+        return False
+
+    async def wait_for_generation_complete(
+        self,
+        page,
+        before_count: int,
+        timeout_s: int = 300,
+        poll_interval: float = 2.0,
+    ) -> bool:
+        """Wait for generation to complete (media src populated in gallery).
+
+        Two-phase wait:
+        1. Wait for gallery item count to increase (generation started → loading card appears)
+        2. Wait for a GCS media URL to be available (generation complete)
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout_s
+
+        # Phase 1: wait for item to appear
+        while _time.monotonic() < deadline:
+            if await self.check_policy_error(page):
+                return False
+            count = await self.count_gallery_items(page)
+            if count > before_count:
+                log.debug("Gallery item appeared (%d → %d)", before_count, count)
+                break
+            await asyncio.sleep(poll_interval)
+        else:
+            log.warning("Timed out waiting for gallery item to appear")
+            return False
+
+        # Phase 2: wait for GCS src to be populated (item finishes generating)
+        while _time.monotonic() < deadline:
+            src = await self.get_newest_media_src(page)
+            if src:
+                log.debug("Media src available: %s", src[:60])
+                return True
+            await asyncio.sleep(poll_interval)
+
+        log.warning("Timed out waiting for media src")
         return False
 
     # ------------------------------------------------------------------
@@ -218,33 +317,20 @@ class FlowUI:
     # ------------------------------------------------------------------
 
     async def click_submit(self, page) -> bool:
-        """Click the generate/submit button (arrow_forward Create)."""
-        # The submit button contains "Create" text with an arrow icon
-        # It's different from the "add_2Create" (add media) button
-        # Strategy: find button with "Create" that has aria or is the rightmost
-        candidates = [
-            page.get_by_role("button", name="Create", exact=True),
-            page.locator("button").filter(has_text="arrow_forward"),
-            page.locator("button[type='submit']"),
-        ]
-        for locator in candidates:
-            if await locator.count() > 0:
-                # If multiple, use last (the submit one, not the "add media" one)
-                count = await locator.count()
-                btn = locator.nth(count - 1)
-                await btn.click()
-                log.debug("Clicked submit button")
-                return True
+        """Click the generate/submit button.
 
-        # JS fallback: find button with Create text that is NOT the add media button
+        In Flow's UI there are two "Create" buttons:
+          1. "add_2 Create" — adds a new media block (NOT the submit)
+          2. "arrow_forward Create" — the actual generate/submit button
+        We target the LAST "Create" button, which is the submit one.
+        """
+        # JS: find last enabled Create button (the arrow_forward one)
         clicked = await page.evaluate("""
             () => {
                 const btns = [...document.querySelectorAll('button')];
-                // Find the rightmost/last Create button (the submit one)
-                const creates = btns.filter(b => {
-                    const txt = b.textContent.trim();
-                    return txt.includes('Create') && !b.disabled;
-                });
+                const creates = btns.filter(b => 
+                    b.textContent.trim().includes('Create') && !b.disabled
+                );
                 if (creates.length > 0) {
                     creates[creates.length - 1].click();
                     return true;
@@ -253,7 +339,14 @@ class FlowUI:
             }
         """)
         if clicked:
-            log.debug("Clicked submit via JS fallback")
+            log.debug("Clicked submit (last Create button) via JS")
+            return True
+
+        # Fallback: button containing "arrow_forward" text (Material icon name)
+        btn = page.locator("button").filter(has_text="arrow_forward").last
+        if await btn.count() > 0:
+            await btn.click()
+            log.debug("Clicked submit via arrow_forward button")
             return True
 
         log.warning("Could not find submit button")
@@ -304,21 +397,17 @@ class FlowUI:
     # ------------------------------------------------------------------
 
     async def count_gallery_items(self, page) -> int:
-        """Count items in the generation gallery."""
-        selectors = [
-            "img[src*='storage.googleapis.com']",
-            "video[src*='storage.googleapis.com']",
-            "[data-index]",
-            "[class*='generated']",
-            "[class*='result']",
-            "[class*='gallery'] img",
-        ]
-        max_count = 0
-        for sel in selectors:
-            count = await page.locator(sel).count()
-            if count > max_count:
-                max_count = count
-        return max_count
+        """Count completed items in the generation gallery.
+
+        Flow serves images via /api/trpc/media.getMediaUrlRedirect (NOT GCS directly).
+        Count img elements with this URL pattern — these are completed generations.
+        """
+        count = await page.evaluate("""
+            () => document.querySelectorAll(
+                'img[src*="getMediaUrlRedirect"], video[src*="getMediaUrlRedirect"]'
+            ).length
+        """)
+        return count or 0
 
     async def check_policy_error(self, page) -> bool:
         """Return True if a content policy error is shown."""
@@ -335,19 +424,32 @@ class FlowUI:
         return any(s in body_lower for s in policy_strings)
 
     async def get_newest_media_src(self, page) -> Optional[str]:
-        """Extract src URL from the newest generated image or video."""
+        """Extract src URL from the newest generated image or video.
+
+        Flow serves media via /api/trpc/media.getMediaUrlRedirect?name=<uuid>
+        This URL requires session cookies to download (use context.request, not aiohttp).
+        """
         src = await page.evaluate("""
             () => {
-                // GCS hosted images
-                const imgs = [...document.querySelectorAll('img[src*="storage.googleapis.com"]')];
-                const vids = [...document.querySelectorAll('video[src*="storage.googleapis.com"]')];
+                const imgs = [...document.querySelectorAll('img[src*="getMediaUrlRedirect"]')];
+                const vids = [...document.querySelectorAll('video[src*="getMediaUrlRedirect"]')];
                 const all = [...imgs, ...vids];
                 if (!all.length) return null;
-                const el = all[all.length - 1];
-                return el.src || el.currentSrc || el.getAttribute('src');
+                return all[all.length - 1].src || all[all.length - 1].currentSrc;
             }
         """)
         return src or None
+
+    async def get_all_media_srcs(self, page) -> list[str]:
+        """Get all generated media URLs on the current project page."""
+        srcs = await page.evaluate("""
+            () => {
+                const imgs = [...document.querySelectorAll('img[src*="getMediaUrlRedirect"]')];
+                const vids = [...document.querySelectorAll('video[src*="getMediaUrlRedirect"]')];
+                return [...imgs, ...vids].map(el => el.src || el.currentSrc).filter(Boolean);
+            }
+        """)
+        return srcs or []
 
     async def click_download_on_newest(self, page) -> bool:
         """Hover over newest item and click its download button."""
