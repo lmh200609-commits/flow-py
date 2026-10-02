@@ -54,3 +54,11 @@ flow_videos/
 # Logs
 *.log
 /tmp/
+
+# Gateway runtime and probe artifacts
+server.pid
+*.pid
+captured_submit_rpcs.json
+probe_reqs.json
+check_acc2_cookies.py
+output/

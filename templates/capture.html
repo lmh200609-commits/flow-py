@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Flow (Veo 3.1) 视频生成中转站与多账号号池中心</title>
+  <style>
+    :root {
+      --bg: #0b0d13;
+      --card-bg: #141722;
+      --card-border: #232838;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1100px; margin: 0 auto; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--card-border);
+      padding-bottom: 16px;
+    }
+    h1 { font-size: 22px; font-weight: 700; color: #fff; }
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 600;
+      background: #1e3a8a;
+      color: #bfdbfe;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .stat-label { font-size: 13px; color: var(--text-muted); }
+    .stat-val { font-size: 26px; font-weight: 700; margin-top: 6px; color: #fff; }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 22px;
+      margin-bottom: 24px;
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Key and Relay info boxes */
+    .relay-info-box {
+      background: rgba(59, 130, 246, 0.05);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .relay-item {
+      display: flex;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+    .relay-item:last-child { margin-bottom: 0; }
+    .relay-label { width: 140px; color: var(--text-muted); font-weight: 500; }
+    .relay-val { font-family: monospace; color: #93c5fd; background: #0b0d13; padding: 3px 8px; border-radius: 4px; border: 1px solid #1e293b; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 10px;
+      font-size: 13px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    th { color: var(--text-muted); font-weight: 600; }
+    .status-pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .status-active { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .status-disabled { background: rgba(107, 114, 128, 0.2); color: #9ca3af; }
+    .status-exhausted { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-secondary { background: #1e2536; color: #cbd5e1; border: 1px solid #333d54; }
+    .btn-danger { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .btn-danger:hover { background: #ef4444; color: #fff; }
+    .key-code {
+      font-family: monospace;
+      color: #38bdf8;
+      background: #090c12;
+      padding: 3px 6px;
+      border-radius: 4px;
+      border: 1px solid #1f293d;
+    }
+    .email-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #60a5fa;
+      font-weight: 500;
+      background: rgba(59, 130, 246, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    pre {
+      background: #07090e;
+      border: 1px solid #1e2433;
+      border-radius: 8px;
+      padding: 14px;
+      color: #cbd5e1;
+      font-size: 12px;
+      overflow-x: auto;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>⚡ Google Flow (Veo 3.1) API 视频中转站</h1>
+        <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">多账号底座号池 · 标准 API 鉴权分发 · 兼容 OpenAI 格式与通用 Agent 接入</p>
+      </div>
+      <div>
+        <span class="badge" id="service-status">服务运行中 · 端口 8765</span>
+      </div>
+    </header>
+
+    <!-- Stats -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">号池就绪账号</div>
+        <div class="stat-val" id="active-accounts" style="color: var(--success);">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">底座可用总点数</div>
+        <div class="stat-val" id="total-credits" style="color: #60a5fa;">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">已发放 API 密钥</div>
+        <div class="stat-val" id="total-keys" style="color: #a78bfa;">-</div>
+      </div>
+    </div>
+
+    <!-- 1. Relay Server Specs -->
+    <div class="card">
+      <div class="card-title">
+        <span>🌐 对外中转站配置信息 (提供给他人或 Agent)</span>
+      </div>
+      <div class="relay-info-box">
+        <div class="relay-item">
+          <span class="relay-label">Base URL (接口基址)</span>
+          <span class="relay-val" id="base-url-display">http://127.0.0.1:8765/v1</span>
+        </div>
+        <div class="relay-item">
+          <span class="relay-label">支持的模型名称</span>
+          <span class="relay-val">veo-3.1</span> <span style="margin: 0 4px; color:#64748b;">|</span> <span class="relay-val">veo-3.1-fast</span> <span style="margin: 0 4px; color:#64748b;">|</span> <span class="relay-val">google-flow</span>
+        </div>
+        <div class="relay-item">
+          <span class="relay-label">认证方式 (Header)</span>
+          <span class="relay-val">Authorization: Bearer sk-flow-...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. API Keys Management -->
+    <div class="card">
+      <div class="card-title">
+        <span>🔑 API 密钥管理 (支持多用户分发 / 额度控制)</span>
+        <button class="btn" onclick="openCreateKeyModal()">➕ 创建新 API Key</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>密钥 ID</th>
+            <th>备注名称 (使用者)</th>
+            <th>API 秘钥 (Key)</th>
+            <th>点数配额</th>
+            <th>已消耗点数</th>
+            <th>累计调用</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="keys-table-body">
+          <tr><td colspan="8" style="text-align: center; color: var(--text-muted);">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 3. Account Pool Table -->
+    <div class="card">
+      <div class="card-title">
+        <span>👥 底座多账号号池 (轮询调度与容灾)</span>
+        <button class="btn btn-secondary" onclick="loadPoolData()">🔄 刷新列表</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>账号 ID</th>
+            <th>谷歌账户邮箱</th>
+            <th>备注名称</th>
+            <th>状态</th>
+            <th>剩余点数</th>
+            <th>已出片</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="account-table-body">
+          <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 4. Client Code Examples -->
+    <div class="card">
+      <div class="card-title">
+        <span>💻 接入调用示例代码 (可直接复制发给使用者)</span>
+      </div>
+      <div style="margin-bottom: 8px; font-size: 13px; color: var(--text-muted);">
+        <strong>Python Agent / 脚本调用 (标准视频接口)：</strong>
+      </div>
+      <pre><code>import requests, time
+
+BASE_URL = "http://127.0.0.1:8765/v1"
+API_KEY = "sk-flow-你的密钥"
+
+# 1. 提交视频生成任务
+headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+data = {
+    "prompt": "一只可爱的小金毛幼犬在阳光下的绿色草坪上欢快奔跑，写实超清，4k",
+    "model": "veo-3.1",
+    "aspect_ratio": "16:9"
+}
+resp = requests.post(f"{BASE_URL}/video/generations", headers=headers, json=data).json()
+task_id = resp["task_id"]
+print("任务已提交, ID:", task_id)
+
+# 2. 轮询获取出片结果
+while True:
+    status_resp = requests.get(f"{BASE_URL}/video/generations/{task_id}", headers=headers).json()
+    if status_resp["status"] == "SUCCESS":
+        print("出片成功！视频下载地址:", status_resp["download_url"])
+        break
+    elif status_resp["status"] == "FAILED":
+        print("生成失败:", status_resp.get("error_message"))
+        break
+    time.sleep(3)</code></pre>
+    </div>
+  </div>
+
+  <script>
+    async function loadData() {
+      await Promise.all([loadPoolData(), loadKeysData()]);
+      const host = window.location.host;
+      document.getElementById('base-url-display').innerText = 'http://' + host + '/v1';
+    }
+
+    async function loadPoolData() {
+      try {
+        const res = await fetch('/v1/pool/accounts');
+        const data = await res.json();
+        const accounts = data.accounts || [];
+
+        const activeCount = accounts.filter(a => a.status === 'active').length;
+        document.getElementById('active-accounts').innerText = activeCount;
+
+        const credsRes = await fetch('/v1/credits');
+        const credsData = await credsRes.json();
+        document.getElementById('total-credits').innerText = credsData.total_active_credits || 0;
+
+        const tbody = document.getElementById('account-table-body');
+        tbody.innerHTML = '';
+        if (accounts.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#9ca3af;">号池暂无账号。</td></tr>';
+          return;
+        }
+
+        accounts.forEach(acc => {
+          const tr = document.createElement('tr');
+          const isAct = acc.status === 'active';
+          const statusHtml = isAct
+            ? '<span class="status-pill status-active">活跃 ACTIVE</span>'
+            : '<span class="status-pill status-exhausted">耗尽 EXHAUSTED</span>';
+
+          const emailDisplay = acc.email 
+            ? `<span class="email-tag">📧 ${acc.email}</span>` 
+            : `<span style="color:#6b7280; font-style:italic;">未设置</span>`;
+
+          tr.innerHTML = `
+            <td><strong>${acc.id}</strong></td>
+            <td>${emailDisplay}</td>
+            <td>${acc.name || '-'}</td>
+            <td>${statusHtml}</td>
+            <td style="color:#60a5fa; font-weight:600;">${acc.credits !== undefined ? acc.credits : '-'}</td>
+            <td>${acc.total_generated || 0}</td>
+            <td>
+              <div style="display:flex; gap:6px;">
+                <button class="btn btn-secondary" style="padding:3px 8px; font-size:11px;" onclick="editAccount('${acc.id}', '${acc.email || ''}', '${acc.name || ''}')">✏️ 编辑</button>
+                <button class="btn btn-danger" style="padding:3px 8px; font-size:11px;" onclick="deleteAccount('${acc.id}')">🗑️ 删除</button>
+              </div>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        console.error('Failed to load pool:', err);
+      }
+    }
+
+    async function loadKeysData() {
+      try {
+        const res = await fetch('/api/keys');
+        const data = await res.json();
+        const keys = data.keys || [];
+
+        document.getElementById('total-keys').innerText = keys.length;
+
+        const tbody = document.getElementById('keys-table-body');
+        tbody.innerHTML = '';
+        if (keys.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#9ca3af;">暂无 API 密钥，请点击上方创建。</td></tr>';
+          return;
+        }
+
+        keys.forEach(k => {
+          const tr = document.createElement('tr');
+          const isAct = k.status === 'active';
+          const statusHtml = isAct
+            ? '<span class="status-pill status-active">活跃</span>'
+            : '<span class="status-pill status-disabled">已禁用</span>';
+
+          const quotaDisplay = k.quota === -1 ? '无限配额' : (k.quota + ' 点');
+
+          tr.innerHTML = `
+            <td><strong>${k.id}</strong></td>
+            <td>${k.name || '-'}</td>
+            <td>
+              <span class="key-code">${k.key}</span>
+              <button class="btn btn-secondary" style="padding:2px 6px; font-size:11px; margin-left:4px;" onclick="copyText('${k.key}')">📋</button>
+            </td>
+            <td>${quotaDisplay}</td>
+            <td style="color:#f59e0b; font-weight:600;">${k.used_credits || 0} 点</td>
+            <td>${k.total_calls || 0} 次</td>
+            <td>${statusHtml}</td>
+            <td>
+              <div style="display:flex; gap:6px;">
+                <button class="btn btn-secondary" style="padding:3px 8px; font-size:11px;" onclick="toggleKey('${k.id}')">${isAct ? '禁用' : '启用'}</button>
+                <button class="btn btn-danger" style="padding:3px 8px; font-size:11px;" onclick="deleteKey('${k.id}')">删除</button>
+              </div>
+            </td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        console.error('Failed to load keys:', err);
+      }
+    }
+
+    async function openCreateKeyModal() {
+      const name = prompt("请输入此 API Key 的使用者或备注名称 (例如：朋友张三、Agent-Bot):", "给朋友测试");
+      if (name === null) return;
+      const quotaStr = prompt("请输入分配的点数配额 (-1 代表不设上限，或输入数字如 500):", "-1");
+      if (quotaStr === null) return;
+      const quota = parseInt(quotaStr) || -1;
+
+      try {
+        const res = await fetch('/api/keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim(), quota: quota })
+        });
+        const data = await res.json();
+        alert("🎉 创建成功！\nKey: " + data.key.key);
+        loadKeysData();
+      } catch (e) {
+        alert("创建失败: " + e);
+      }
+    }
+
+    async function toggleKey(keyId) {
+      try {
+        await fetch(`/api/keys/${keyId}/toggle`, { method: 'POST' });
+        loadKeysData();
+      } catch (e) {
+        alert("操作失败: " + e);
+      }
+    }
+
+    async function deleteKey(keyId) {
+      if (!confirm(`确定要删除密钥 ${keyId} 吗？`)) return;
+      try {
+        await fetch(`/api/keys/${keyId}`, { method: 'DELETE' });
+        loadKeysData();
+      } catch (e) {
+        alert("删除失败: " + e);
+      }
+    }
+
+    function copyText(text) {
+      navigator.clipboard.writeText(text).then(() => {
+        alert("已复制密钥到剪贴板！");
+      }).catch(() => {
+        prompt("请手动复制：", text);
+      });
+    }
+
+    async function editAccount(accId, curEmail, curName) {
+      const email = prompt("请输入此账号对应的谷歌邮箱:", curEmail);
+      if (email === null) return;
+      const name = prompt("请输入显示备注名称:", curName || ("Gemini Pro (" + email + ")"));
+      if (name === null) return;
+
+      try {
+        await fetch(`/api/pool/accounts/${accId}/update`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email.trim(), name: name.trim() })
+        });
+        loadPoolData();
+      } catch (e) {
+        alert("更新失败: " + e);
+      }
+    }
+
+    async function deleteAccount(accId) {
+      if (!confirm(`确定要从号池中移除账号 ${accId} 吗？`)) return;
+      try {
+        await fetch(`/api/pool/accounts/${accId}`, { method: 'DELETE' });
+        loadPoolData();
+      } catch (e) {
+        alert("删除失败: " + e);
+      }
+    }
+
+    loadData();
+  </script>
+</body>
+</html>

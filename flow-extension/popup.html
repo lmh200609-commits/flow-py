@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      width: 330px;
+      margin: 0;
+      padding: 16px;
+      background: #0f1117;
+      color: #f3f4f6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    h3 {
+      margin: 0 0 12px;
+      font-size: 15px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: #fff;
+    }
+    .account-card {
+      background: #181d29;
+      border: 1px solid #2a3142;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .field-label {
+      font-size: 11px;
+      color: #9ca3af;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .detected-email {
+      font-size: 13px;
+      margin-bottom: 8px;
+      min-height: 20px;
+      word-break: break-all;
+    }
+    .input-box {
+      width: 100%;
+      background: #0b0d13;
+      border: 1px solid #2e384d;
+      border-radius: 6px;
+      color: #fff;
+      padding: 8px 10px;
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    .input-box:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+    .btn {
+      width: 100%;
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: #1d4ed8; }
+    .btn:disabled { background: #4b5563; cursor: not-allowed; }
+    #status {
+      margin-top: 10px;
+      font-size: 12px;
+      text-align: center;
+      min-height: 18px;
+      line-height: 1.4;
+    }
+    .success { color: #34d399; font-weight: bold; }
+    .error { color: #f87171; }
+    .hint {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 10px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <h3>🎬 Flow 号池一键授权</h3>
+
+  <div class="account-card">
+    <div class="field-label">当前谷歌账号邮箱 (识别/绑定)</div>
+    <div class="detected-email" id="email-display">
+      <span style="color:#9ca3af;">🔍 正在检测已打开的 Google 标签页...</span>
+    </div>
+    <input type="email" id="manual-email" class="input-box" placeholder="例如：your-name@gmail.com" />
+  </div>
+
+  <button class="btn" id="btn-sync">⚡ 一键同步当前凭据与邮箱</button>
+  <div id="status"></div>
+
+  <div class="hint">
+    💡 提示：插件会自动扫描你 Chrome 中打开的 Google 页面；如果当前处于其他网页，也可以直接在上方核对或修改你的 Gmail 邮箱，点击按钮即可完成绑定。
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
