@@ -137,3 +137,47 @@ print("出片完成！由账号生成：", result["used_account"])
 print("本地视频文件：", result["local_video_path"])
 print("在线预览链接：", result["download_url"])
 ```
+
+---
+
+## 🎬 进阶：AI 导演与分镜装配线 (AI Director & Storyboard)
+
+系统内建受 **Open-Sora** 与 **MoneyPrinterTurbo** 启发的 AI 导演分镜与全自动后期剪辑装配线：
+
+### 1. 影视级 Prompt 智能编译 (`/v1/director/compile_prompt`)
+将口语化描述自动增强为涵盖景别（Shot Type）、运镜（Movement）、布光（Lighting）、电影机系统（Lens & Gear）与色彩调色（Color Grade）的专业级 Prompt：
+```python
+from client_sdk import FlowVideoClient
+client = FlowVideoClient()
+
+enhanced = client.compile_prompt("雨夜赛博朋克追逐", genre="cyberpunk")
+print(enhanced["compiled_prompt"])
+# 输出：wide cinematic shot, 雨夜赛博朋克追逐, slow, smooth dolly-in towards the subject, vibrant neon cyberpunk lighting..., shot on ARRI Alexa 65...
+```
+
+### 2. 智能分镜规划与预览 (`/v1/director/plan_storyboard`)
+根据故事叙事自动拆解为三幕式连贯分镜表，统一注入视觉风格锚点（Style Anchor）：
+```python
+plan = client.plan_storyboard(
+    title="深空救援",
+    narrative="空间站求救，宇航员出舱太空行走，与救援飞船成功对接",
+    genre="sci-fi",
+    num_shots=3
+)
+for shot in plan["shots"]:
+    print(f"[{shot['shot_name']}] {shot['prompt']}")
+```
+
+### 3. 多分镜全自动连续渲染与 FFmpeg 一键成片 (`/v1/storyboard/create`)
+一键提交分镜任务，网关自动在号池中排队渲染所有分镜、截获下载流媒体，并自动调用本机 FFmpeg 进行无缝串联或电影级交叉淡入淡出（Crossfade）剪辑，直接交付完整成片：
+```python
+storyboard = client.create_storyboard(
+    title="深空救援",
+    narrative="空间站求救，宇航员出舱太空行走，与救援飞船成功对接",
+    genre="sci-fi",
+    num_shots=3,
+    transition="crossfade", # 支持 crossfade (淡入淡出) 或 fast (极速拼接)
+    wait=True
+)
+print("完整成片下载链接：", storyboard["final_video_url"])
+```

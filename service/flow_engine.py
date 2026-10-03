@@ -25,12 +25,10 @@ OUTPUT_DIR = Path("D:/chatgpt聊天记录1/日常/flow-py/output")
 def get_preferred_proxy() -> Optional[str]:
     """Auto-detect active proxy from env or common local ports."""
     import socket
-    # 1. Direct env
     for k in ["FLOW_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"]:
         val = os.environ.get(k)
         if val:
             return val
-    # 2. Check common local proxy ports
     common_ports = [7890, 7897, 10808, 10809, 2080, 7891]
     for p in common_ports:
         try:
@@ -42,6 +40,7 @@ def get_preferred_proxy() -> Optional[str]:
         except Exception:
             pass
     return None
+
 
 class FlowEngine:
     _instance: Optional["FlowEngine"] = None
@@ -97,20 +96,12 @@ class FlowEngine:
         async def on_response(resp):
             url = resp.url
             ct = resp.headers.get("content-type", "")
-            if "video" in ct or "googlevideo" in url or ".mp4" in url:
+            # Filter real generated video streams (exclude landing page background clips)
+            is_vid = "video" in ct or "googlevideo" in url or ".mp4" in url or "flow-content.google/video" in url or "videoplayback" in url
+            if is_vid and "landing" not in url:
                 log.info("Detected video stream URL: %s", url[:120])
                 if url not in self._captured_videos:
                     self._captured_videos.append(url)
-            elif "batchexecute" in url:
-                try:
-                    # check credits rpc
-                    if "nzlxg" in url:
-                        txt = await resp.text()
-                        # parse credits
-                        if "1050" in txt or "1000" in txt:
-                            pass
-                except Exception:
-                    pass
 
         self._page.on("response", on_response)
 
@@ -162,7 +153,16 @@ class FlowEngine:
                 await page.goto(self.project_url, wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(3)
 
-            # Start fresh chat session
+            # Close any leftover modal if present
+            close_btn = await page.query_selector("button[aria-label='关闭'], .close-button, i:text-is('close')")
+            if close_btn:
+                try:
+                    await close_btn.click()
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+
+            # Start fresh chat session if button is present
             new_chat_btn = page.locator("button[aria-label='发起新的会话']")
             if await new_chat_btn.count() > 0:
                 try:
@@ -183,7 +183,7 @@ class FlowEngine:
                 full_prompt = f"生成一段视频：{prompt}"
 
             log.info("[%s] Typing prompt...", task_id)
-            await page.keyboard.type(full_prompt, delay=20)
+            await page.keyboard.type(full_prompt, delay=15)
             await asyncio.sleep(1)
 
             # Wait for generate button
@@ -220,16 +220,17 @@ class FlowEngine:
                             pass
 
                 # Check for video in captured network streams
-                if self._captured_videos:
-                    video_url = self._captured_videos[-1]
+                clean_streams = [s for s in self._captured_videos if "landing" not in s]
+                if clean_streams:
+                    video_url = clean_streams[-1]
                     log.info("[%s] Captured video URL from network: %s", task_id, video_url[:120])
                     break
 
-                # Check DOM for completed video element or canvas card
+                # Check DOM for completed video element
                 dom_videos = await page.evaluate("""
                     () => {
                         const vids = [...document.querySelectorAll('video')].map(v => v.src || v.currentSrc).filter(Boolean);
-                        return vids;
+                        return vids.filter(v => !v.includes('landing'));
                     }
                 """)
                 if dom_videos:
@@ -239,24 +240,38 @@ class FlowEngine:
 
                 # Check if stop button has reverted to generate button (means finished)
                 stop_btn = page.locator("button:has(i:text-is('stop')), button[aria-label*='停止']")
-                if (time.time() - start_time) > 30 and await stop_btn.count() == 0:
-                    # Let's inspect media tab if still not found
-                    # Check if video thumbnail exists
+                if (time.time() - start_time) > 25 and await stop_btn.count() == 0:
                     video_thumbnails = page.locator("img[src*='google'], .canvas-node, .chat-message-content")
                     if await video_thumbnails.count() > 0:
                         log.info("[%s] Generation completed (reverted to idle).", task_id)
-                        # We will capture screenshot or download
                         break
+
+            # Active canvas probe if stream wasn't caught passively
+            if not video_url:
+                log.info("[%s] Actively probing canvas card for video stream...", task_id)
+                try:
+                    await page.mouse.click(440, 350)
+                    await asyncio.sleep(1.5)
+                    await page.mouse.click(440, 350)
+                    await asyncio.sleep(2)
+                    clean_streams = [s for s in self._captured_videos if "landing" not in s]
+                    if clean_streams:
+                        video_url = clean_streams[-1]
+                        log.info("[%s] Captured stream after active canvas click: %s", task_id, video_url[:120])
+                except Exception as probe_err:
+                    log.warning("[%s] Canvas probe failed: %s", task_id, probe_err)
 
             # Save preview screenshot
             preview_img = OUTPUT_DIR / f"{task_id}.png"
-            await page.screenshot(path=str(preview_img))
+            try:
+                await page.screenshot(path=str(preview_img))
+            except Exception:
+                pass
 
             # Download or save video if URL found
             if video_url and video_url.startswith("http"):
                 try:
                     local_video_path = OUTPUT_DIR / f"{task_id}.mp4"
-                    # Use page request to fetch video with valid session cookies
                     resp = await page.context.request.get(video_url)
                     if resp.status == 200:
                         data = await resp.body()
@@ -267,12 +282,12 @@ class FlowEngine:
 
             return {
                 "task_id": task_id,
-                "status": "completed" if (video_url or preview_img.exists()) else "failed",
+                "status": "completed" if (local_video_path and local_video_path.exists()) or preview_img.exists() else "failed",
                 "prompt": prompt,
                 "model": model,
                 "aspect_ratio": aspect_ratio,
                 "video_url": video_url or "",
                 "local_video_path": str(local_video_path) if local_video_path and local_video_path.exists() else "",
-                "preview_image_path": str(preview_img),
+                "preview_image_path": str(preview_img) if preview_img.exists() else "",
                 "created_at": int(time.time()),
             }

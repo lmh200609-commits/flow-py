@@ -683,6 +683,200 @@ async def debug_current_render():
     state["preview_url"] = "http://127.0.0.1:8765/files/live_render_status.png"
     return state
 
+# ── Storyboard & AI Director Pipelines ───────────────────────────────────────
+from director.prompt_compiler import PromptCompiler, PromptSpec, ShotType, CameraMovement, LightingStyle, LensGear, ColorGrade
+from director.storyboard import StoryboardPlanner, StoryboardPlan, StoryboardShot
+from pipeline.ffmpeg_assembler import FFmpegAssembler
+
+STORYBOARDS: Dict[str, Dict[str, Any]] = {}
+
+class CompilePromptRequest(BaseModel):
+    subject: str
+    genre: str = "sci-fi"
+    shot_type: Optional[str] = None
+    camera_movement: Optional[str] = None
+    lighting: Optional[str] = None
+    lens: Optional[str] = None
+    color_grade: Optional[str] = None
+    style_anchor: Optional[str] = None
+
+class PlanStoryboardRequest(BaseModel):
+    title: str = "微电影分镜"
+    narrative: str
+    genre: str = "sci-fi"
+    num_shots: int = 3
+    style_anchor: Optional[str] = None
+    custom_shots: Optional[List[Dict[str, Any]]] = None
+
+class CreateStoryboardRequest(BaseModel):
+    title: str = "微电影分镜"
+    narrative: str
+    genre: str = "sci-fi"
+    num_shots: int = 3
+    style_anchor: Optional[str] = None
+    custom_shots: Optional[List[Dict[str, Any]]] = None
+    transition: str = "fast"  # fast | crossfade
+    wait: bool = False
+
+async def _execute_storyboard(sb_id: str, transition: str = "fast"):
+    """Background task to sequentially render each shot in storyboard and merge with FFmpeg."""
+    sb = STORYBOARDS.get(sb_id)
+    if not sb:
+        return
+
+    sb["status"] = "rendering"
+    log.info("[Storyboard %s] Starting multi-shot production pipeline...", sb_id)
+    pool_engine = PoolEngine.get_instance()
+    rendered_video_paths: List[Path] = []
+
+    try:
+        shots = sb.get("shots", [])
+        for idx, shot in enumerate(shots, start=1):
+            sb["current_shot_index"] = idx
+            shot["status"] = "rendering"
+            log.info("[Storyboard %s] Rendering Shot %d/%d: %s", sb_id, idx, len(shots), shot.get("shot_name"))
+
+            # Render single shot
+            shot_res = await pool_engine.generate_with_failover(
+                prompt=shot["prompt"],
+                model="Veo 3.1 - Fast",
+                aspect_ratio="16:9",
+                timeout_s=150
+            )
+
+            shot["status"] = shot_res.get("status", "completed")
+            vpath = shot_res.get("local_video_path")
+            if vpath and Path(vpath).exists():
+                shot["video_path"] = vpath
+                shot["video_url"] = f"http://127.0.0.1:8765/files/{Path(vpath).name}"
+                rendered_video_paths.append(Path(vpath))
+            else:
+                log.warning("[Storyboard %s] Shot %d did not produce local video path!", sb_id, idx)
+
+            if shot_res.get("preview_image_path") and Path(shot_res["preview_image_path"]).exists():
+                shot["preview_url"] = f"http://127.0.0.1:8765/files/{Path(shot_res['preview_image_path']).name}"
+
+        # All shots rendered, start assembly
+        if rendered_video_paths:
+            sb["status"] = "assembling"
+            log.info("[Storyboard %s] Assembling %d video clips using FFmpeg...", sb_id, len(rendered_video_paths))
+            assembler = FFmpegAssembler()
+            final_mp4 = OUTPUT_DIR / f"storyboard_{sb_id}_final.mp4"
+
+            if transition == "crossfade" and len(rendered_video_paths) > 1:
+                assembler.concat_with_crossfade(rendered_video_paths, final_mp4, transition_duration=0.5, shot_duration=10.0)
+            else:
+                assembler.concat_fast(rendered_video_paths, final_mp4)
+
+            if final_mp4.exists():
+                sb["status"] = "completed"
+                sb["final_video_path"] = str(final_mp4)
+                sb["final_video_url"] = f"http://127.0.0.1:8765/files/{final_mp4.name}"
+                log.info("[Storyboard %s] Successfully assembled master video: %s (Size: %d bytes)",
+                         sb_id, final_mp4, final_mp4.stat().st_size)
+            else:
+                sb["status"] = "failed"
+                sb["error"] = "FFmpeg assembly completed but output file not found"
+        else:
+            sb["status"] = "failed"
+            sb["error"] = "No shots produced valid video files"
+
+    except Exception as e:
+        log.exception("[Storyboard %s] Failed during production: %s", sb_id, e)
+        sb["status"] = "failed"
+        sb["error"] = str(e)
+    finally:
+        sb["updated_at"] = int(time.time())
+
+@app.post("/v1/director/compile_prompt")
+async def compile_prompt_endpoint(
+    req: CompilePromptRequest,
+    key_info: Optional[Dict[str, Any]] = Depends(verify_api_key)
+):
+    """Compiles a short description into a detailed cinematic prompt for Veo 3.1."""
+    enhanced = PromptCompiler.auto_enhance(
+        raw_prompt=req.subject,
+        genre=req.genre,
+        style_anchor=req.style_anchor,
+        shot_type=req.shot_type
+    )
+    return {
+        "status": "ok",
+        "genre": req.genre,
+        "raw_subject": req.subject,
+        "compiled_prompt": enhanced
+    }
+
+@app.post("/v1/director/plan_storyboard")
+async def plan_storyboard_endpoint(
+    req: PlanStoryboardRequest,
+    key_info: Optional[Dict[str, Any]] = Depends(verify_api_key)
+):
+    """Generates a structured multi-shot storyboard plan for preview and confirmation."""
+    plan = StoryboardPlanner.create_storyboard(
+        title=req.title,
+        narrative=req.narrative,
+        genre=req.genre,
+        num_shots=req.num_shots,
+        style_anchor=req.style_anchor,
+        custom_shots=req.custom_shots
+    )
+    return plan.to_dict()
+
+@app.post("/v1/storyboard/create")
+async def create_storyboard_endpoint(
+    req: CreateStoryboardRequest,
+    background_tasks: BackgroundTasks,
+    key_info: Optional[Dict[str, Any]] = Depends(verify_api_key)
+):
+    """Initiates an end-to-end multi-shot storyboard production and assembly pipeline."""
+    plan = StoryboardPlanner.create_storyboard(
+        title=req.title,
+        narrative=req.narrative,
+        genre=req.genre,
+        num_shots=req.num_shots,
+        style_anchor=req.style_anchor,
+        custom_shots=req.custom_shots
+    )
+    sb_dict = plan.to_dict()
+    sb_dict["transition"] = req.transition
+    STORYBOARDS[plan.storyboard_id] = sb_dict
+
+    background_tasks.add_task(_execute_storyboard, plan.storyboard_id, req.transition)
+
+    if req.wait:
+        # Wait up to timeout
+        start = time.time()
+        while time.time() - start < (req.num_shots * 160):
+            await asyncio.sleep(3)
+            cur = STORYBOARDS.get(plan.storyboard_id, {})
+            if cur.get("status") in ["completed", "failed"]:
+                return cur
+        return STORYBOARDS.get(plan.storyboard_id, {})
+
+    return {
+        "storyboard_id": plan.storyboard_id,
+        "title": plan.title,
+        "num_shots": len(plan.shots),
+        "status": "queued",
+        "check_url": f"http://127.0.0.1:8765/v1/storyboard/status/{plan.storyboard_id}"
+    }
+
+@app.get("/v1/storyboard/status/{storyboard_id}")
+async def get_storyboard_status(storyboard_id: str):
+    if storyboard_id not in STORYBOARDS:
+        raise HTTPException(status_code=404, detail="Storyboard ID not found")
+    return STORYBOARDS[storyboard_id]
+
+@app.get("/v1/storyboards")
+async def list_storyboards():
+    return {
+        "object": "list",
+        "total": len(STORYBOARDS),
+        "storyboards": list(STORYBOARDS.values())
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("gateway:app", host="127.0.0.1", port=8765, reload=False)
+
