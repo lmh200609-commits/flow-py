@@ -63,3 +63,7 @@ probe_reqs.json
 check_acc2_cookies.py
 output/
 test_pipeline_unit.py
+
+assemble_final.py
+fetch_shot1.py
+plan_autumn.py
