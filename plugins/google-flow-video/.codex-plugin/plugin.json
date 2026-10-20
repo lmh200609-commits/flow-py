@@ -1,0 +1,35 @@
+{
+  "name": "google-flow-video",
+  "version": "1.0.0",
+  "description": "Google Flow (Veo 3.1) AI 视频生成插件，提供开箱即用的多账号号池中转调用与视频直接交付能力。",
+  "author": {
+    "name": "Local developer",
+    "email": "lmh200609@gmail.com"
+  },
+  "homepage": "http://127.0.0.1:8765/capture",
+  "keywords": [
+    "video",
+    "veo-3.1",
+    "google-flow",
+    "ai-video",
+    "media"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Google Flow 视频生成",
+    "shortDescription": "调用 Google Flow (Veo 3.1) 号池中转站生成 AI 视频短片",
+    "longDescription": "专为 Codex 打造的 Google Flow (Veo 3.1) 官方视频模型插件。支持多 Pro 账号轮询调度、自动故障转移与 MP4 视频本地快速下载交付。用户只需输入提示词，即可全自动生成并播放视频。",
+    "developerName": "AI Relay Studio",
+    "category": "Media",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "帮我生成一段高中校园恋爱的情侣漫步短片，阳光树荫唯美风格",
+      "生成一段赛博朋克雨夜街道的电影质感视频，霓虹灯反光，16:9",
+      "生成一只金毛小狗在草地上欢快奔跑的微距特写视频"
+    ],
+    "brandColor": "#4285F4"
+  }
+}

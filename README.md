@@ -15,6 +15,25 @@ Inspired by [notebooklm-py](https://github.com/teng-lin/notebooklm-py). Uses Pla
 
 ---
 
+
+---
+
+## 🔌 Codex 插件一键安装 (Codex Plugin)
+
+本项目已支持作为 Codex 原生插件，任何拥有 Codex 的用户只需两条命令即可完成安装并调用：
+
+```bash
+# 1. 添加插件市场
+codex plugin marketplace add lmh200609-commits/flow-py
+
+# 2. 安装并启用插件
+codex plugin add google-flow-video
+```
+
+安装完成后：
+- **在 Codex 对话中**：直接说 `“生成一段高中校园恋爱的情侣漫步短片”`，Codex 将自动调用多账号号池完成视频生成并落盘播放。
+- **自定义配置**：运行 `python scripts/configure.py <你的网关URL> <你的API_KEY>` 可随时切换上游中转网关。
+
 ## Features
 
 | Capability | CLI | Python API |
